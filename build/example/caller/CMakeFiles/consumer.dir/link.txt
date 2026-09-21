@@ -1,0 +1,1 @@
+/usr/bin/g++ -g CMakeFiles/consumer.dir/callfriendservice.cc.o CMakeFiles/consumer.dir/__/friend.pb.cc.o -o /home/zhao_user/code/mprpc/bin/consumer   -L/home/zhao_user/code/mprpc/lib  -Wl,-rpath,/home/zhao_user/code/mprpc/lib /home/zhao_user/code/mprpc/lib/libmprpc.a -lprotobuf -lmuduo_net -lmuduo_base -lpthread -lzookeeper_mt

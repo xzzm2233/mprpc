@@ -1,0 +1,74 @@
+[
+{
+  "directory": "/home/zhao_user/code/mprpc/build/src",
+  "command": "/usr/bin/g++ -DTHREADED -I/home/zhao_user/code/mprpc/src/include -I/home/zhao_user/code/mprpc/example -g -o CMakeFiles/mprpc.dir/logger.cc.o -c /home/zhao_user/code/mprpc/src/logger.cc",
+  "file": "/home/zhao_user/code/mprpc/src/logger.cc",
+  "output": "src/CMakeFiles/mprpc.dir/logger.cc.o"
+},
+{
+  "directory": "/home/zhao_user/code/mprpc/build/src",
+  "command": "/usr/bin/g++ -DTHREADED -I/home/zhao_user/code/mprpc/src/include -I/home/zhao_user/code/mprpc/example -g -o CMakeFiles/mprpc.dir/mprpcapplication.cc.o -c /home/zhao_user/code/mprpc/src/mprpcapplication.cc",
+  "file": "/home/zhao_user/code/mprpc/src/mprpcapplication.cc",
+  "output": "src/CMakeFiles/mprpc.dir/mprpcapplication.cc.o"
+},
+{
+  "directory": "/home/zhao_user/code/mprpc/build/src",
+  "command": "/usr/bin/g++ -DTHREADED -I/home/zhao_user/code/mprpc/src/include -I/home/zhao_user/code/mprpc/example -g -o CMakeFiles/mprpc.dir/mprpcchannel.cc.o -c /home/zhao_user/code/mprpc/src/mprpcchannel.cc",
+  "file": "/home/zhao_user/code/mprpc/src/mprpcchannel.cc",
+  "output": "src/CMakeFiles/mprpc.dir/mprpcchannel.cc.o"
+},
+{
+  "directory": "/home/zhao_user/code/mprpc/build/src",
+  "command": "/usr/bin/g++ -DTHREADED -I/home/zhao_user/code/mprpc/src/include -I/home/zhao_user/code/mprpc/example -g -o CMakeFiles/mprpc.dir/mprpcconfig.cc.o -c /home/zhao_user/code/mprpc/src/mprpcconfig.cc",
+  "file": "/home/zhao_user/code/mprpc/src/mprpcconfig.cc",
+  "output": "src/CMakeFiles/mprpc.dir/mprpcconfig.cc.o"
+},
+{
+  "directory": "/home/zhao_user/code/mprpc/build/src",
+  "command": "/usr/bin/g++ -DTHREADED -I/home/zhao_user/code/mprpc/src/include -I/home/zhao_user/code/mprpc/example -g -o CMakeFiles/mprpc.dir/mprpccontroller.cc.o -c /home/zhao_user/code/mprpc/src/mprpccontroller.cc",
+  "file": "/home/zhao_user/code/mprpc/src/mprpccontroller.cc",
+  "output": "src/CMakeFiles/mprpc.dir/mprpccontroller.cc.o"
+},
+{
+  "directory": "/home/zhao_user/code/mprpc/build/src",
+  "command": "/usr/bin/g++ -DTHREADED -I/home/zhao_user/code/mprpc/src/include -I/home/zhao_user/code/mprpc/example -g -o CMakeFiles/mprpc.dir/mprpcprovider.cc.o -c /home/zhao_user/code/mprpc/src/mprpcprovider.cc",
+  "file": "/home/zhao_user/code/mprpc/src/mprpcprovider.cc",
+  "output": "src/CMakeFiles/mprpc.dir/mprpcprovider.cc.o"
+},
+{
+  "directory": "/home/zhao_user/code/mprpc/build/src",
+  "command": "/usr/bin/g++ -DTHREADED -I/home/zhao_user/code/mprpc/src/include -I/home/zhao_user/code/mprpc/example -g -o CMakeFiles/mprpc.dir/rpcheader.pb.cc.o -c /home/zhao_user/code/mprpc/src/rpcheader.pb.cc",
+  "file": "/home/zhao_user/code/mprpc/src/rpcheader.pb.cc",
+  "output": "src/CMakeFiles/mprpc.dir/rpcheader.pb.cc.o"
+},
+{
+  "directory": "/home/zhao_user/code/mprpc/build/src",
+  "command": "/usr/bin/g++ -DTHREADED -I/home/zhao_user/code/mprpc/src/include -I/home/zhao_user/code/mprpc/example -g -o CMakeFiles/mprpc.dir/zookeeperutil.cc.o -c /home/zhao_user/code/mprpc/src/zookeeperutil.cc",
+  "file": "/home/zhao_user/code/mprpc/src/zookeeperutil.cc",
+  "output": "src/CMakeFiles/mprpc.dir/zookeeperutil.cc.o"
+},
+{
+  "directory": "/home/zhao_user/code/mprpc/build/example/callee",
+  "command": "/usr/bin/g++  -I/home/zhao_user/code/mprpc/src/include -I/home/zhao_user/code/mprpc/example -g -o CMakeFiles/provider.dir/friendservice.cc.o -c /home/zhao_user/code/mprpc/example/callee/friendservice.cc",
+  "file": "/home/zhao_user/code/mprpc/example/callee/friendservice.cc",
+  "output": "example/callee/CMakeFiles/provider.dir/friendservice.cc.o"
+},
+{
+  "directory": "/home/zhao_user/code/mprpc/build/example/callee",
+  "command": "/usr/bin/g++  -I/home/zhao_user/code/mprpc/src/include -I/home/zhao_user/code/mprpc/example -g -o CMakeFiles/provider.dir/__/friend.pb.cc.o -c /home/zhao_user/code/mprpc/example/friend.pb.cc",
+  "file": "/home/zhao_user/code/mprpc/example/friend.pb.cc",
+  "output": "example/callee/CMakeFiles/provider.dir/__/friend.pb.cc.o"
+},
+{
+  "directory": "/home/zhao_user/code/mprpc/build/example/caller",
+  "command": "/usr/bin/g++  -I/home/zhao_user/code/mprpc/src/include -I/home/zhao_user/code/mprpc/example -g -o CMakeFiles/consumer.dir/callfriendservice.cc.o -c /home/zhao_user/code/mprpc/example/caller/callfriendservice.cc",
+  "file": "/home/zhao_user/code/mprpc/example/caller/callfriendservice.cc",
+  "output": "example/caller/CMakeFiles/consumer.dir/callfriendservice.cc.o"
+},
+{
+  "directory": "/home/zhao_user/code/mprpc/build/example/caller",
+  "command": "/usr/bin/g++  -I/home/zhao_user/code/mprpc/src/include -I/home/zhao_user/code/mprpc/example -g -o CMakeFiles/consumer.dir/__/friend.pb.cc.o -c /home/zhao_user/code/mprpc/example/friend.pb.cc",
+  "file": "/home/zhao_user/code/mprpc/example/friend.pb.cc",
+  "output": "example/caller/CMakeFiles/consumer.dir/__/friend.pb.cc.o"
+}
+]
