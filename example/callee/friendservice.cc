@@ -3,7 +3,7 @@
 #include "friend.pb.h"
 #include "mprpcapplication.h"
 #include "mprpcprovider.h"
-#include "logger.h"
+#include <mymuduo/Logger.h>
 
 class FriendService : public fixbug::FriendServiceRpc
 {

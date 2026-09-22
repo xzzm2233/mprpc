@@ -254,81 +254,23 @@ example/callee/CMakeFiles/provider.dir/friendservice.cc.o: \
  /home/zhao_user/code/mprpc/src/include/mprpcchannel.h \
  /home/zhao_user/code/mprpc/src/include/mprpccontroller.h \
  /home/zhao_user/code/mprpc/src/include/mprpcprovider.h \
- /usr/local/include/muduo/net/TcpServer.h \
- /usr/local/include/muduo/base/Atomic.h \
- /usr/local/include/muduo/base/noncopyable.h \
- /usr/local/include/muduo/base/Types.h \
- /usr/local/include/muduo/net/TcpConnection.h \
- /usr/local/include/muduo/base/StringPiece.h \
- /usr/local/include/muduo/net/Callbacks.h \
- /usr/local/include/muduo/base/Timestamp.h \
- /usr/local/include/muduo/base/copyable.h \
- /usr/include/boost/operators.hpp /usr/include/boost/config.hpp \
- /usr/include/boost/config/user.hpp \
- /usr/include/boost/config/detail/select_compiler_config.hpp \
- /usr/include/boost/config/compiler/gcc.hpp \
- /usr/include/boost/config/detail/select_stdlib_config.hpp \
- /usr/include/c++/11/version \
- /usr/include/boost/config/stdlib/libstdcpp3.hpp \
- /usr/include/boost/config/detail/select_platform_config.hpp \
- /usr/include/boost/config/platform/linux.hpp \
- /usr/include/boost/config/detail/posix_features.hpp \
- /usr/include/boost/config/detail/suffix.hpp \
- /usr/include/boost/config/helper_macros.hpp \
- /usr/include/boost/detail/workaround.hpp \
- /usr/include/boost/config/workaround.hpp \
- /usr/include/boost/core/addressof.hpp \
- /usr/local/include/muduo/net/Buffer.h \
- /usr/local/include/muduo/net/Endian.h \
- /usr/local/include/muduo/net/InetAddress.h /usr/include/netinet/in.h \
- /usr/include/sys/socket.h /usr/include/bits/types/struct_iovec.h \
- /usr/include/bits/socket.h /usr/include/bits/socket_type.h \
- /usr/include/bits/sockaddr.h /usr/include/asm/socket.h \
- /usr/include/asm-generic/socket.h /usr/include/asm/sockios.h \
- /usr/include/asm-generic/sockios.h \
+ /usr/include/mymuduo/TcpServer.h /usr/include/mymuduo/EventLoop.h \
+ /usr/include/mymuduo/noncopyable.h /usr/include/mymuduo/Timestamp.h \
+ /usr/include/mymuduo/CurrentThread.h /usr/include/sys/syscall.h \
+ /usr/include/asm/unistd.h /usr/include/asm/unistd_64.h \
+ /usr/include/bits/syscall.h /usr/include/mymuduo/TimerId.h \
+ /usr/include/mymuduo/Callbacks.h /usr/include/mymuduo/Acceptor.h \
+ /usr/include/mymuduo/Socket.h /usr/include/mymuduo/Channel.h \
+ /usr/include/mymuduo/InetAddress.h /usr/include/arpa/inet.h \
+ /usr/include/netinet/in.h /usr/include/sys/socket.h \
+ /usr/include/bits/types/struct_iovec.h /usr/include/bits/socket.h \
+ /usr/include/bits/socket_type.h /usr/include/bits/sockaddr.h \
+ /usr/include/asm/socket.h /usr/include/asm-generic/socket.h \
+ /usr/include/asm/sockios.h /usr/include/asm-generic/sockios.h \
  /usr/include/bits/types/struct_osockaddr.h /usr/include/bits/in.h \
- /usr/include/boost/any.hpp /usr/include/boost/type_index.hpp \
- /usr/include/boost/type_index/stl_type_index.hpp \
- /usr/include/boost/type_index/type_index_facade.hpp \
- /usr/include/boost/container_hash/hash_fwd.hpp \
- /usr/include/boost/static_assert.hpp \
- /usr/include/boost/throw_exception.hpp \
- /usr/include/boost/assert/source_location.hpp \
- /usr/include/boost/current_function.hpp /usr/include/boost/cstdint.hpp \
- /usr/include/boost/exception/exception.hpp \
- /usr/include/boost/core/demangle.hpp /usr/include/c++/11/cxxabi.h \
- /usr/include/c++/11/x86_64-redhat-linux/bits/cxxabi_tweaks.h \
- /usr/include/boost/type_traits/conditional.hpp \
- /usr/include/boost/type_traits/is_const.hpp \
- /usr/include/boost/type_traits/integral_constant.hpp \
- /usr/include/boost/type_traits/is_reference.hpp \
- /usr/include/boost/type_traits/is_lvalue_reference.hpp \
- /usr/include/boost/type_traits/is_rvalue_reference.hpp \
- /usr/include/boost/type_traits/is_volatile.hpp \
- /usr/include/boost/type_traits/remove_cv.hpp \
- /usr/include/boost/type_traits/remove_reference.hpp \
- /usr/include/boost/type_traits/decay.hpp \
- /usr/include/boost/type_traits/is_array.hpp \
- /usr/include/boost/type_traits/is_function.hpp \
- /usr/include/boost/type_traits/detail/config.hpp \
- /usr/include/boost/version.hpp \
- /usr/include/boost/type_traits/detail/is_function_cxx_11.hpp \
- /usr/include/boost/type_traits/remove_bounds.hpp \
- /usr/include/boost/type_traits/remove_extent.hpp \
- /usr/include/boost/type_traits/add_pointer.hpp \
- /usr/include/boost/type_traits/add_reference.hpp \
- /usr/include/boost/utility/enable_if.hpp \
- /usr/include/boost/core/enable_if.hpp \
- /usr/include/boost/type_traits/is_same.hpp \
- /usr/local/include/muduo/net/EventLoop.h \
- /usr/local/include/muduo/base/Mutex.h \
- /usr/local/include/muduo/base/CurrentThread.h \
- /usr/local/include/muduo/net/TimerId.h \
- /home/zhao_user/code/mprpc/src/include/logger.h \
- /home/zhao_user/code/mprpc/src/include/lockqueue.h \
- /usr/include/c++/11/queue /usr/include/c++/11/deque \
- /usr/include/c++/11/bits/stl_deque.h /usr/include/c++/11/bits/deque.tcc \
- /usr/include/c++/11/bits/stl_queue.h /usr/include/c++/11/thread \
- /usr/include/c++/11/bits/std_thread.h \
+ /usr/include/mymuduo/EventLoopThreadPool.h /usr/include/mymuduo/Buffer.h \
+ /usr/include/mymuduo/TcpConnection.h /usr/include/mymuduo/AsyncLogging.h \
+ /usr/include/mymuduo/FixedBuffer.h /usr/include/mymuduo/Thread.h \
+ /usr/include/c++/11/thread /usr/include/c++/11/bits/std_thread.h \
  /usr/include/c++/11/bits/this_thread_sleep.h \
- /usr/include/c++/11/condition_variable
+ /usr/include/c++/11/condition_variable /usr/include/mymuduo/Logger.h

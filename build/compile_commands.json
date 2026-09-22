@@ -1,12 +1,6 @@
 [
 {
   "directory": "/home/zhao_user/code/mprpc/build/src",
-  "command": "/usr/bin/g++ -DTHREADED -I/home/zhao_user/code/mprpc/src/include -I/home/zhao_user/code/mprpc/example -g -o CMakeFiles/mprpc.dir/logger.cc.o -c /home/zhao_user/code/mprpc/src/logger.cc",
-  "file": "/home/zhao_user/code/mprpc/src/logger.cc",
-  "output": "src/CMakeFiles/mprpc.dir/logger.cc.o"
-},
-{
-  "directory": "/home/zhao_user/code/mprpc/build/src",
   "command": "/usr/bin/g++ -DTHREADED -I/home/zhao_user/code/mprpc/src/include -I/home/zhao_user/code/mprpc/example -g -o CMakeFiles/mprpc.dir/mprpcapplication.cc.o -c /home/zhao_user/code/mprpc/src/mprpcapplication.cc",
   "file": "/home/zhao_user/code/mprpc/src/mprpcapplication.cc",
   "output": "src/CMakeFiles/mprpc.dir/mprpcapplication.cc.o"

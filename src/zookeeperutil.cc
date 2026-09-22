@@ -37,13 +37,7 @@ void ZkClient::Start()
     std::string port = MprpcApplication::GetInstance().GetConfig().Load("zookeeperport");
     std::string constr = host + ":" + port;
 
-    /*
-    zookeeper_mt: 多线程版本
-    zookeeper的API客户端程序提供了三个线程
-    API调用线程
-    网络I/O线程    pthread_create    poll
-    watcher回调线程
-    */
+   
     m_zhandle = zookeeper_init(constr.c_str(), global_watcher, 30000, nullptr, nullptr, 0);
     if (nullptr == m_zhandle)
     {

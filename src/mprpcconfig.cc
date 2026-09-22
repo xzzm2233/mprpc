@@ -12,7 +12,6 @@ void MprpcConfig::LoadConfigFile(const char *config_file)
         exit(EXIT_FAILURE);
     }
 
-    // 1. 注释   2.正确的配置项 =   3.去掉开头多余的空格
     while (!feof(pf))
     {
         char buf[512] = {0};

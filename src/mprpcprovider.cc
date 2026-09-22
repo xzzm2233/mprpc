@@ -1,15 +1,9 @@
 #include "mprpcprovider.h"
 #include "mprpcapplication.h"
 #include "rpcheader.pb.h"
-#include "logger.h"
+#include <mymuduo/Logger.h>
 #include "zookeeperutil.h"
 
-/*
-service_name => service描述
-                => service* 记录服务对象
-                method_name => method方法对象
-*/
-// 这里是框架提供给外部使用的，可以发布rpc方法的函数接口
 void RpcProvider::NotifyService(google::protobuf::Service *service)
 {
     ServiceInfo service_info;
@@ -17,7 +11,7 @@ void RpcProvider::NotifyService(google::protobuf::Service *service)
     const google::protobuf::ServiceDescriptor *pserviceDesc = service->GetDescriptor();
     // 获取服务的名字
     std::string service_name = pserviceDesc->name();
-    // 获取服务对象service的方法的数量
+
     int methodCut = pserviceDesc->method_count();
 
     LOG_INFO("service_name:%s:", service_name.c_str());
@@ -40,10 +34,10 @@ void RpcProvider::Run()
     // 读取配置文件rpcservice的信息
     std::string ip = MprpcApplication::GetInstance().GetConfig().Load("rpcserverip");
     uint16_t port = atoi(MprpcApplication::GetInstance().GetConfig().Load("rpcserverport").c_str());
-    muduo::net::InetAddress address(ip, port);
+    InetAddress address( port,ip);
 
     // 创建TcpServer对象
-    muduo::net::TcpServer server(&m_eventLoop, address, "RpcProvider");
+    TcpServer server(&m_eventLoop, address, "RpcProvider");
 
     // 绑定连接回调和消息读写回调方法 分离了网络代码与业务代码
     server.setConnectionCallback(std::bind(&RpcProvider::OnConnection, this, std::placeholders::_1));
@@ -53,10 +47,9 @@ void RpcProvider::Run()
     // 设置muduo库的线程数量
     server.setThreadNum(4);
 
-    // 把当前rpc节点上要发布的服务全部注册到zk上面，让rpc client可以从zk上发现服务
     ZkClient zkCli;
     zkCli.Start();
-    // server_name为永久性节点，method_name为临时性节点
+
     for (auto &sp : m_serviceMap)
     {
         // /server_name  /UserServiceRpc
@@ -64,7 +57,6 @@ void RpcProvider::Run()
         zkCli.Create(service_path.c_str(), nullptr, 0);
         for (auto &mp : sp.second.m_methodMap)
         {
-            // service_name/method_name  /UserServiceRpc/Login 存储当前这个rpc服务节点主机的ip和port
             std::string method_path = service_path + "/" + mp.first;
             char method_path_data[128] = {0};
             sprintf(method_path_data, "%s:%d", ip.c_str(), port);
@@ -73,7 +65,6 @@ void RpcProvider::Run()
         }
     }
 
-    // std::cout << "RpcProvider start service at ip:" << ip << " port:" << port << std::endl;
     LOG_INFO("RpcProvider start service at ip:%s port:%u", ip.c_str(), port);
 
     // 启动网络服务
@@ -81,7 +72,7 @@ void RpcProvider::Run()
     m_eventLoop.loop();
 }
 // 新的socket连接回调
-void RpcProvider::OnConnection(const muduo::net::TcpConnectionPtr &conn)
+void RpcProvider::OnConnection(const TcpConnectionPtr &conn)
 {
     if (!conn->connected())
     {
@@ -90,18 +81,9 @@ void RpcProvider::OnConnection(const muduo::net::TcpConnectionPtr &conn)
     }
 }
 
-/*
-在框架内部, RpcProvider和RpcConsumer协商好之间通信用的protobuf数据类型
-service_name method_name args    定义proto的message类型，进行数据头的序列化和反序列化
-                                 service_name method_name args_size
-16UserServiceLoginzhang san123456
-
-header_size(4个字节) + header_str + args_str
-*/
-// 已建立连接用户的读写事件回调，如果远程有一个rpc服务的调用请求，那么OnMessage方法就会响应
-void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn,
-                            muduo::net::Buffer *buffer,
-                            muduo::Timestamp)
+void RpcProvider::OnMessage(const TcpConnectionPtr &conn,
+                            Buffer *buffer,
+                            Timestamp)
 {
     // 网络上接收的远程rpc调用请求的字符流
     std::string recv_buf = buffer->retrieveAllAsString();
@@ -127,7 +109,7 @@ void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn,
     {
         // 数据头反序列化失败
         // std::cout << "rpc_header_str:" << rpc_header_str << " parse error!" << std::endl;
-        LOG_ERR("rpc_header_str:%s parse error!", rpc_header_str.c_str());
+        LOG_ERROR("rpc_header_str:%s parse error!", rpc_header_str.c_str());
         return;
     }
 
@@ -146,7 +128,7 @@ void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn,
     if (mit == it->second.m_methodMap.end())
     {
         // std::cout << service_name << ":" << method_name << " is not exist!" << std::endl;
-        LOG_ERR("%s:%s is not exist!", service_name.c_str(), method_name.c_str());
+        LOG_ERROR("%s:%s is not exist!", service_name.c_str(), method_name.c_str());
         return;
     }
     google::protobuf::Service *service = it->second.m_service;      // 获取service对象
@@ -157,13 +139,13 @@ void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn,
     if (!request->ParseFromString(args_str))
     {
         // std::cout << "request parse error! content:" << args_str << std::endl;
-        LOG_ERR("request parse error! content:%s", args_str.c_str());
+        LOG_ERROR("request parse error! content:%s", args_str.c_str());
         return;
     }
     google::protobuf::Message *response = service->GetResponsePrototype(method).New();
 
     // 给下面的method方法的调用，绑定一个Closure的回调函数
-    google::protobuf::Closure *done = google::protobuf::NewCallback<RpcProvider, const muduo::net::TcpConnectionPtr &, google::protobuf::Message *>(this, &RpcProvider::SendrpcResponse, conn, response);
+    google::protobuf::Closure *done = google::protobuf::NewCallback<RpcProvider, const TcpConnectionPtr &, google::protobuf::Message *>(this, &RpcProvider::SendrpcResponse, conn, response);
 
     // 在框架上根据远端rpc请求，调用当前rpc节点上发布的方法
     // new UserService().Login(controller, request, response, done)
@@ -171,7 +153,7 @@ void RpcProvider::OnMessage(const muduo::net::TcpConnectionPtr &conn,
 }
 
 // Closure的回调操作，用于序列化rpc的响应和网络发送
-void RpcProvider::SendrpcResponse(const muduo::net::TcpConnectionPtr &conn, google::protobuf::Message *response)
+void RpcProvider::SendrpcResponse(const TcpConnectionPtr &conn, google::protobuf::Message *response)
 {
     std::string response_str;
     if (response->SerializeToString(&response_str)) // response进行序列化
@@ -182,7 +164,7 @@ void RpcProvider::SendrpcResponse(const muduo::net::TcpConnectionPtr &conn, goog
     else
     {
         // std::cout << "serialize response_str error!" << std::endl;
-        LOG_ERR("serialize response_str error!");
+        LOG_ERROR("serialize response_str error!");
     }
     conn->shutdown(); // 模拟http的短链接服务，由rpcprovider主动断开连接
 }
