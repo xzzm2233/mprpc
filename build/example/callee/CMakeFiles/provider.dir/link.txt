@@ -1,1 +1,0 @@
-/usr/bin/g++ -g CMakeFiles/provider.dir/friendservice.cc.o CMakeFiles/provider.dir/__/friend.pb.cc.o -o /home/zhao_user/code/mprpc/bin/provider   -L/home/zhao_user/code/mprpc/lib  -Wl,-rpath,/home/zhao_user/code/mprpc/lib /home/zhao_user/code/mprpc/lib/libmprpc.a -lprotobuf -lmymuduo -lpthread -lzookeeper_mt
