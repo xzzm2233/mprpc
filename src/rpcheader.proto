@@ -9,5 +9,9 @@ message RpcHeader
   uint32 args_size    = 3;
   uint64 req_id       = 4;
   int32  err_code     = 5;
+  // 0   = 成功
+  // 400 = 请求格式错误（header/request 解析失败）
+  // 404 = service 或 method 不存在
+  // 500 = 服务端内部错误（业务 SetFailed / 序列化失败）
   string err_msg      = 6;
 }

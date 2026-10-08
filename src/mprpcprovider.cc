@@ -92,7 +92,7 @@ void RpcProvider::OnMessage(const TcpConnectionPtr &conn,
         uint32_t header_size = 0;
         ::memcpy(&header_size, buffer->peek(), 4);
 
-        // wait header_str
+        // header_str
         if (buffer->readableBytes() < header_size + 4)
         {
             return;
@@ -109,7 +109,7 @@ void RpcProvider::OnMessage(const TcpConnectionPtr &conn,
 
         uint32_t args_size = header.args_size();
         uint32_t total = 4 + header_size + args_size;
-        // wait args_str
+        // args_str
         if (buffer->readableBytes() < total)
         {
             return;

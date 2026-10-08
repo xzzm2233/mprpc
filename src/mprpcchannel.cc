@@ -41,9 +41,13 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
     if (!request->SerializeToString(&args))
     {
         if (controller)
+        {
             controller->SetFailed("serialize request failed");
+        }
         if (done)
+        {
             done->Run();
+        }
         return;
     }
     header.set_args_size(static_cast<uint32_t>(args.size()));
@@ -79,9 +83,13 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
             m_pendingCalls.erase(req_id);
         }
         if (controller)
+        {
             controller->SetFailed("connection not ready");
+        }
         if (done)
+        {
             done->Run();
+        }
     }
 }
 
@@ -123,13 +131,17 @@ void MprpcChannel::onMessage(const TcpConnectionPtr &conn, Buffer *buffer, Times
     while (true)
     {
         if (buffer->readableBytes() < 4)
+        {
             return;
+        }
 
         uint32_t header_size = 0;
         ::memcpy(&header_size, buffer->peek(), 4);
 
         if (buffer->readableBytes() < 4 + header_size)
+        {
             return;
+        }
 
         std::string header_str(buffer->peek() + 4, header_size);
         mprpc::RpcHeader header;
@@ -144,7 +156,9 @@ void MprpcChannel::onMessage(const TcpConnectionPtr &conn, Buffer *buffer, Times
         uint32_t total = 4 + header_size + args_size;
 
         if (buffer->readableBytes() < total)
+        {
             return;
+        }
 
         std::string body(buffer->peek() + 4 + header_size, args_size);
 
@@ -185,7 +199,9 @@ void MprpcChannel::onResponse(const mprpc::RpcHeader &header, const std::string 
     }
 
     if (call.done)
+    {
         call.done->Run();
+    }
 }
 
 void MprpcChannel::onCancelCallback(uint64_t req_id)
@@ -201,13 +217,19 @@ void MprpcChannel::cancelInLoop(uint64_t req_id)
         std::lock_guard<std::mutex> lock(m_mutex);
         auto it = m_pendingCalls.find(req_id);
         if (it == m_pendingCalls.end())
+        {
             return;
+        }
         call = it->second;
         m_pendingCalls.erase(it);
     }
 
     if (call.controller)
+    {
         call.controller->SetFailed("rpc canceled");
+    }
     if (call.done)
+    {
         call.done->Run();
+    }
 }
