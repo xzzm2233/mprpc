@@ -6,6 +6,15 @@
 #include <mymuduo/Logger.h>
 #include <zookeeperutil.h>
 
+#include <arpa/inet.h>
+
+namespace
+{
+// 网络报文长度上限，防止恶意/异常报文导致 OOM
+constexpr uint32_t kMaxHeaderSize = 1 * 1024 * 1024; // 1MB
+constexpr uint32_t kMaxBodySize = 64 * 1024 * 1024;  // 64MB
+}
+
 void RpcProvider::NotifyService(google::protobuf::Service *service)
 {
     ServiceInfo service_info;
@@ -89,8 +98,15 @@ void RpcProvider::OnMessage(const TcpConnectionPtr &conn,
             return;
         }
 
-        uint32_t header_size = 0;
-        ::memcpy(&header_size, buffer->peek(), 4);
+        uint32_t header_size_be = 0;
+        ::memcpy(&header_size_be, buffer->peek(), 4);
+        uint32_t header_size = ntohl(header_size_be);
+        if (header_size > kMaxHeaderSize)
+        {
+            LOG_ERROR("header_size too large: %u", header_size);
+            buffer->retrieveAll();
+            return;
+        }
 
         // header_str
         if (buffer->readableBytes() < header_size + 4)
@@ -108,6 +124,12 @@ void RpcProvider::OnMessage(const TcpConnectionPtr &conn,
         }
 
         uint32_t args_size = header.args_size();
+        if (args_size > kMaxBodySize)
+        {
+            LOG_ERROR("args_size too large: %u", args_size);
+            buffer->retrieveAll();
+            return;
+        }
         uint32_t total = 4 + header_size + args_size;
         // args_str
         if (buffer->readableBytes() < total)
@@ -205,9 +227,10 @@ void RpcProvider::SendResponse(const TcpConnectionPtr &conn,
     std::string header_str;
     header.SerializeToString(&header_str);
     uint32_t header_size = static_cast<uint32_t>(header_str.size());
+    uint32_t header_size_be = htonl(header_size);
 
     std::string packet;
-    packet.append(reinterpret_cast<char *>(&header_size), 4);
+    packet.append(reinterpret_cast<char *>(&header_size_be), 4);
     packet.append(header_str);
     packet.append(body);
 
@@ -228,9 +251,10 @@ void RpcProvider::SendError(const TcpConnectionPtr &conn,
     std::string header_str;
     header.SerializeToString(&header_str);
     uint32_t header_size = static_cast<uint32_t>(header_str.size());
+    uint32_t header_size_be = htonl(header_size);
 
     std::string packet;
-    packet.append(reinterpret_cast<char *>(&header_size), 4);
+    packet.append(reinterpret_cast<char *>(&header_size_be), 4);
     packet.append(header_str);
 
     conn->send(packet);

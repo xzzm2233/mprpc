@@ -16,7 +16,7 @@ void global_watcher(zhandle_t *zh, int type,
     }
 }
 
-ZkClient::ZkClient() : m_zhandle(nullptr)
+ZkClient::ZkClient() : m_zhandle(nullptr), m_semInited(false)
 {
 }
 
@@ -24,7 +24,14 @@ ZkClient::~ZkClient()
 {
     if (m_zhandle != nullptr)
     {
+        // 先关闭句柄（之后不会再触发 watcher），再销毁信号量
         zookeeper_close(m_zhandle);
+        m_zhandle = nullptr;
+    }
+    if (m_semInited)
+    {
+        sem_destroy(&m_sem);
+        m_semInited = false;
     }
 }
 
@@ -42,11 +49,12 @@ void ZkClient::Start()
         exit(EXIT_FAILURE);
     }
 
-    sem_t sem;
-    sem_init(&sem, 0, 0);
-    zoo_set_context(m_zhandle, &sem);
+    // 信号量存为成员，避免把栈地址交给 zookeeper 句柄后在函数返回后悬空
+    sem_init(&m_sem, 0, 0);
+    m_semInited = true;
+    zoo_set_context(m_zhandle, &m_sem);
 
-    sem_wait(&sem);
+    sem_wait(&m_sem);
     std::cout << "zookeeper_init success!" << std::endl;
 }
 

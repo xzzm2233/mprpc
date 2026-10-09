@@ -37,6 +37,12 @@ void MprpcApplication::Init(int argc, char **argv)
         }
     }
 
+    if (config_file.empty())
+    {
+        ShowArgsHelp();
+        exit(EXIT_FAILURE);
+    }
+
     m_config.LoadConfigFile(config_file.c_str());
 }
 

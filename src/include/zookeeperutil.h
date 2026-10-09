@@ -14,4 +14,6 @@ public:
 
 private:
     zhandle_t *m_zhandle;
+    sem_t m_sem;
+    bool m_semInited;
 };

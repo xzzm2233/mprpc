@@ -7,6 +7,7 @@
 #include <mymuduo/TcpConnection.h>
 #include <mymuduo/Buffer.h>
 #include <mymuduo/Timestamp.h>
+#include <mymuduo/TimerId.h>
 
 #include <google/protobuf/service.h>
 #include <google/protobuf/descriptor.h>
@@ -39,17 +40,18 @@ private:
 
     void onCancelCallback(uint64_t req_id);
     void cancelInLoop(uint64_t req_id);
+    void onTimeout(uint64_t req_id);
 
     struct PendingCall
     {
         google::protobuf::RpcController *controller;
         google::protobuf::Message *response;
         google::protobuf::Closure *done;
+        TimerId timerId;
     };
 
     EventLoop *loop_;
     TcpClient client_;
-    TcpConnectionPtr connection_;
 
     std::atomic<uint64_t> m_reqId;
     std::mutex m_mutex;

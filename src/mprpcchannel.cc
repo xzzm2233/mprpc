@@ -5,6 +5,16 @@
 
 #include <cstring>
 #include <functional>
+#include <arpa/inet.h>
+
+namespace
+{
+    // 网络报文长度上限，防止恶意/异常报文导致 OOM
+    uint32_t kMaxHeaderSize = 1 * 1024 * 1024; // 1MB
+    uint32_t kMaxBodySize = 64 * 1024 * 1024;  // 64MB
+    // 单个 RPC 请求的超时时间（秒）
+    double kTimeoutSeconds = 30.0;
+}
 
 MprpcChannel::MprpcChannel(EventLoop *loop, const InetAddress &serverAddr)
     : loop_(loop),
@@ -17,6 +27,7 @@ MprpcChannel::MprpcChannel(EventLoop *loop, const InetAddress &serverAddr)
                                          std::placeholders::_1,
                                          std::placeholders::_2,
                                          std::placeholders::_3));
+    client_.enableRetry();
     client_.connect();
 }
 
@@ -55,9 +66,10 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
     std::string header_str;
     header.SerializeToString(&header_str);
     uint32_t header_size = static_cast<uint32_t>(header_str.size());
+    uint32_t header_size_be = htonl(header_size);
 
     std::string packet;
-    packet.append(reinterpret_cast<char *>(&header_size), 4);
+    packet.append(reinterpret_cast<char *>(&header_size_be), 4);
     packet.append(header_str);
     packet.append(args);
 
@@ -67,14 +79,20 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
             std::bind(&MprpcChannel::onCancelCallback, this, req_id));
     }
 
+    // 注册超时定时器
+    TimerId timer = loop_->runAfter(
+        kTimeoutSeconds,
+        std::bind(&MprpcChannel::onTimeout, this, req_id));
+
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        m_pendingCalls[req_id] = {controller, response, done};
+        m_pendingCalls[req_id] = {controller, response, done, timer};
     }
 
-    if (connection_ && connection_->connected())
+    TcpConnectionPtr conn = client_.connection();
+    if (conn && conn->connected())
     {
-        connection_->send(packet);
+        conn->send(packet);
     }
     else
     {
@@ -82,6 +100,7 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
             std::lock_guard<std::mutex> lock(m_mutex);
             m_pendingCalls.erase(req_id);
         }
+        loop_->cancel(timer);
         if (controller)
         {
             controller->SetFailed("connection not ready");
@@ -98,13 +117,11 @@ void MprpcChannel::onConnection(const TcpConnectionPtr &conn)
     if (conn->connected())
     {
         LOG_INFO("MprpcChannel connected to %s", conn->peerAddress().toIpPort().c_str());
-        connection_ = conn;
     }
     else
     {
         LOG_INFO("MprpcChannel disconnected from %s",
                  conn->peerAddress().toIpPort().c_str());
-        connection_.reset();
 
         std::unordered_map<uint64_t, PendingCall> pending;
         {
@@ -113,6 +130,7 @@ void MprpcChannel::onConnection(const TcpConnectionPtr &conn)
         }
         for (auto &kv : pending)
         {
+            loop_->cancel(kv.second.timerId);
             if (kv.second.controller)
             {
                 kv.second.controller->SetFailed("connection closed");
@@ -135,8 +153,15 @@ void MprpcChannel::onMessage(const TcpConnectionPtr &conn, Buffer *buffer, Times
             return;
         }
 
-        uint32_t header_size = 0;
-        ::memcpy(&header_size, buffer->peek(), 4);
+        uint32_t header_size_be = 0;
+        ::memcpy(&header_size_be, buffer->peek(), 4);
+        uint32_t header_size = ntohl(header_size_be);
+        if (header_size > kMaxHeaderSize)
+        {
+            LOG_ERROR("header_size too large: %u", header_size);
+            buffer->retrieveAll();
+            return;
+        }
 
         if (buffer->readableBytes() < 4 + header_size)
         {
@@ -153,6 +178,12 @@ void MprpcChannel::onMessage(const TcpConnectionPtr &conn, Buffer *buffer, Times
         }
 
         uint32_t args_size = header.args_size();
+        if (args_size > kMaxBodySize)
+        {
+            LOG_ERROR("args_size too large: %u", args_size);
+            buffer->retrieveAll();
+            return;
+        }
         uint32_t total = 4 + header_size + args_size;
 
         if (buffer->readableBytes() < total)
@@ -183,6 +214,8 @@ void MprpcChannel::onResponse(const mprpc::RpcHeader &header, const std::string 
         call = it->second;
         m_pendingCalls.erase(it);
     }
+
+    loop_->cancel(call.timerId);
 
     if (header.err_code() != 0)
     {
@@ -224,9 +257,35 @@ void MprpcChannel::cancelInLoop(uint64_t req_id)
         m_pendingCalls.erase(it);
     }
 
+    loop_->cancel(call.timerId);
+
     if (call.controller)
     {
         call.controller->SetFailed("rpc canceled");
+    }
+    if (call.done)
+    {
+        call.done->Run();
+    }
+}
+
+void MprpcChannel::onTimeout(uint64_t req_id)
+{
+    PendingCall call;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_pendingCalls.find(req_id);
+        if (it == m_pendingCalls.end())
+        {
+            return;
+        }
+        call = it->second;
+        m_pendingCalls.erase(it);
+    }
+
+    if (call.controller)
+    {
+        call.controller->SetFailed("rpc timeout");
     }
     if (call.done)
     {
