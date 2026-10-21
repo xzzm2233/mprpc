@@ -183,6 +183,10 @@ class RpcHeader PROTOBUF_FINAL :
     kReqIdFieldNumber = 4,
     kArgsSizeFieldNumber = 3,
     kErrCodeFieldNumber = 5,
+    kTraceIdFieldNumber = 7,
+    kRawSizeFieldNumber = 8,
+    kDeadlineMsFieldNumber = 9,
+    kFlagsFieldNumber = 10,
   };
   // bytes service_name = 1;
   void clear_service_name();
@@ -259,6 +263,42 @@ class RpcHeader PROTOBUF_FINAL :
   void _internal_set_err_code(::PROTOBUF_NAMESPACE_ID::int32 value);
   public:
 
+  // uint64 trace_id = 7;
+  void clear_trace_id();
+  ::PROTOBUF_NAMESPACE_ID::uint64 trace_id() const;
+  void set_trace_id(::PROTOBUF_NAMESPACE_ID::uint64 value);
+  private:
+  ::PROTOBUF_NAMESPACE_ID::uint64 _internal_trace_id() const;
+  void _internal_set_trace_id(::PROTOBUF_NAMESPACE_ID::uint64 value);
+  public:
+
+  // uint32 raw_size = 8;
+  void clear_raw_size();
+  ::PROTOBUF_NAMESPACE_ID::uint32 raw_size() const;
+  void set_raw_size(::PROTOBUF_NAMESPACE_ID::uint32 value);
+  private:
+  ::PROTOBUF_NAMESPACE_ID::uint32 _internal_raw_size() const;
+  void _internal_set_raw_size(::PROTOBUF_NAMESPACE_ID::uint32 value);
+  public:
+
+  // uint32 deadline_ms = 9;
+  void clear_deadline_ms();
+  ::PROTOBUF_NAMESPACE_ID::uint32 deadline_ms() const;
+  void set_deadline_ms(::PROTOBUF_NAMESPACE_ID::uint32 value);
+  private:
+  ::PROTOBUF_NAMESPACE_ID::uint32 _internal_deadline_ms() const;
+  void _internal_set_deadline_ms(::PROTOBUF_NAMESPACE_ID::uint32 value);
+  public:
+
+  // uint32 flags = 10;
+  void clear_flags();
+  ::PROTOBUF_NAMESPACE_ID::uint32 flags() const;
+  void set_flags(::PROTOBUF_NAMESPACE_ID::uint32 value);
+  private:
+  ::PROTOBUF_NAMESPACE_ID::uint32 _internal_flags() const;
+  void _internal_set_flags(::PROTOBUF_NAMESPACE_ID::uint32 value);
+  public:
+
   // @@protoc_insertion_point(class_scope:mprpc.RpcHeader)
  private:
   class _Internal;
@@ -272,6 +312,10 @@ class RpcHeader PROTOBUF_FINAL :
   ::PROTOBUF_NAMESPACE_ID::uint64 req_id_;
   ::PROTOBUF_NAMESPACE_ID::uint32 args_size_;
   ::PROTOBUF_NAMESPACE_ID::int32 err_code_;
+  ::PROTOBUF_NAMESPACE_ID::uint64 trace_id_;
+  ::PROTOBUF_NAMESPACE_ID::uint32 raw_size_;
+  ::PROTOBUF_NAMESPACE_ID::uint32 deadline_ms_;
+  ::PROTOBUF_NAMESPACE_ID::uint32 flags_;
   mutable ::PROTOBUF_NAMESPACE_ID::internal::CachedSize _cached_size_;
   friend struct ::TableStruct_rpcheader_2eproto;
 };
@@ -527,6 +571,86 @@ inline void RpcHeader::set_allocated_err_msg(std::string* err_msg) {
   err_msg_.SetAllocated(&::PROTOBUF_NAMESPACE_ID::internal::GetEmptyStringAlreadyInited(), err_msg,
       GetArena());
   // @@protoc_insertion_point(field_set_allocated:mprpc.RpcHeader.err_msg)
+}
+
+// uint64 trace_id = 7;
+inline void RpcHeader::clear_trace_id() {
+  trace_id_ = PROTOBUF_ULONGLONG(0);
+}
+inline ::PROTOBUF_NAMESPACE_ID::uint64 RpcHeader::_internal_trace_id() const {
+  return trace_id_;
+}
+inline ::PROTOBUF_NAMESPACE_ID::uint64 RpcHeader::trace_id() const {
+  // @@protoc_insertion_point(field_get:mprpc.RpcHeader.trace_id)
+  return _internal_trace_id();
+}
+inline void RpcHeader::_internal_set_trace_id(::PROTOBUF_NAMESPACE_ID::uint64 value) {
+  
+  trace_id_ = value;
+}
+inline void RpcHeader::set_trace_id(::PROTOBUF_NAMESPACE_ID::uint64 value) {
+  _internal_set_trace_id(value);
+  // @@protoc_insertion_point(field_set:mprpc.RpcHeader.trace_id)
+}
+
+// uint32 raw_size = 8;
+inline void RpcHeader::clear_raw_size() {
+  raw_size_ = 0u;
+}
+inline ::PROTOBUF_NAMESPACE_ID::uint32 RpcHeader::_internal_raw_size() const {
+  return raw_size_;
+}
+inline ::PROTOBUF_NAMESPACE_ID::uint32 RpcHeader::raw_size() const {
+  // @@protoc_insertion_point(field_get:mprpc.RpcHeader.raw_size)
+  return _internal_raw_size();
+}
+inline void RpcHeader::_internal_set_raw_size(::PROTOBUF_NAMESPACE_ID::uint32 value) {
+  
+  raw_size_ = value;
+}
+inline void RpcHeader::set_raw_size(::PROTOBUF_NAMESPACE_ID::uint32 value) {
+  _internal_set_raw_size(value);
+  // @@protoc_insertion_point(field_set:mprpc.RpcHeader.raw_size)
+}
+
+// uint32 deadline_ms = 9;
+inline void RpcHeader::clear_deadline_ms() {
+  deadline_ms_ = 0u;
+}
+inline ::PROTOBUF_NAMESPACE_ID::uint32 RpcHeader::_internal_deadline_ms() const {
+  return deadline_ms_;
+}
+inline ::PROTOBUF_NAMESPACE_ID::uint32 RpcHeader::deadline_ms() const {
+  // @@protoc_insertion_point(field_get:mprpc.RpcHeader.deadline_ms)
+  return _internal_deadline_ms();
+}
+inline void RpcHeader::_internal_set_deadline_ms(::PROTOBUF_NAMESPACE_ID::uint32 value) {
+  
+  deadline_ms_ = value;
+}
+inline void RpcHeader::set_deadline_ms(::PROTOBUF_NAMESPACE_ID::uint32 value) {
+  _internal_set_deadline_ms(value);
+  // @@protoc_insertion_point(field_set:mprpc.RpcHeader.deadline_ms)
+}
+
+// uint32 flags = 10;
+inline void RpcHeader::clear_flags() {
+  flags_ = 0u;
+}
+inline ::PROTOBUF_NAMESPACE_ID::uint32 RpcHeader::_internal_flags() const {
+  return flags_;
+}
+inline ::PROTOBUF_NAMESPACE_ID::uint32 RpcHeader::flags() const {
+  // @@protoc_insertion_point(field_get:mprpc.RpcHeader.flags)
+  return _internal_flags();
+}
+inline void RpcHeader::_internal_set_flags(::PROTOBUF_NAMESPACE_ID::uint32 value) {
+  
+  flags_ = value;
+}
+inline void RpcHeader::set_flags(::PROTOBUF_NAMESPACE_ID::uint32 value) {
+  _internal_set_flags(value);
+  // @@protoc_insertion_point(field_set:mprpc.RpcHeader.flags)
 }
 
 #ifdef __GNUC__

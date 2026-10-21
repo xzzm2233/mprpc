@@ -6,12 +6,20 @@ message RpcHeader
 {
   bytes  service_name = 1;
   bytes  method_name  = 2;
-  uint32 args_size    = 3;
+  uint32 args_size    = 3; // body 字节数；压缩时为压缩后的长度
   uint64 req_id       = 4;
   int32  err_code     = 5;
   // 0   = 成功
-  // 400 = 请求格式错误（header/request 解析失败）
-  // 404 = service 或 method 不存在
-  // 500 = 服务端内部错误（业务 SetFailed / 序列化失败）
+  // 400 = 请求格式错误
+  // 404 = service/method 不存在
+  // 408 = deadline 超时
+  // 429 = 服务端过载
+  // 500 = 服务端内部错误
   string err_msg      = 6;
+
+  // 扩展帧元数据。
+  uint64 trace_id    = 7;
+  uint32 raw_size    = 8; // 解压后的 body 字节数；0 在未压缩旧帧中表示 args_size
+  uint32 deadline_ms = 9; // 剩余调用预算（毫秒）
+  uint32 flags       = 10; // bit 0 = zstd 压缩
 }
