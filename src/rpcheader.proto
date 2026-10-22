@@ -16,8 +16,6 @@ message RpcHeader
   // 429 = 服务端过载
   // 500 = 服务端内部错误
   string err_msg      = 6;
-
-  // 扩展帧元数据。
   uint64 trace_id    = 7;
   uint32 raw_size    = 8; // 解压后的 body 字节数；0 在未压缩旧帧中表示 args_size
   uint32 deadline_ms = 9; // 剩余调用预算（毫秒）

@@ -10,7 +10,7 @@
 #include <fstream>
 #include <string>
 
-// 逐行读取 key=value 配置，忽略空行和注释行。
+// 逐行读取 key=value 配置，忽略空行和注释行
 void MprpcConfig::LoadConfigFile(const char *config_file)
 {
     if (config_file == nullptr)
@@ -26,7 +26,7 @@ void MprpcConfig::LoadConfigFile(const char *config_file)
         exit(EXIT_FAILURE);
     }
 
-    // 每次加载都以新文件为准；同一文件内重复键由后出现的值覆盖。
+    // 每次加载都以新文件为准；同一文件内重复键由后出现的值覆盖
     m_configMap.clear();
 
     std::string read_buf;
@@ -73,7 +73,7 @@ void MprpcConfig::LoadConfigFile(const char *config_file)
 
 std::string MprpcConfig::Load(const std::string &key)
 {
-    // 必选项缺失会记录错误，调用方仍负责校验返回值。
+    // 必选项缺失会记录错误，调用方仍负责校验返回值
     auto it = m_configMap.find(key);
     if (it == m_configMap.end())
     {
@@ -85,7 +85,7 @@ std::string MprpcConfig::Load(const std::string &key)
 
 std::string MprpcConfig::Load(const std::string &key, const std::string &def)
 {
-    // 可选项缺失或为空时采用默认值。
+    // 可选项缺失或为空时采用默认值
     auto it = m_configMap.find(key);
     if (it == m_configMap.end() || it->second.empty())
     {
@@ -117,7 +117,7 @@ int MprpcConfig::LoadInt(const std::string &key, int def)
 
 bool MprpcConfig::LoadBool(const std::string &key, bool def)
 {
-    // 接受常见的 true/false 写法，未知值回退到默认值。
+    // 接受常见的 true/false 写法，未知值回退到默认值
     auto it = m_configMap.find(key);
     if (it == m_configMap.end() || it->second.empty())
     {
@@ -165,7 +165,7 @@ double MprpcConfig::LoadDouble(const std::string &key, double def)
 
 void MprpcConfig::Trim(std::string &src_buf)
 {
-    // 移除字符串两端的空白字符，不改变中间内容。
+    // 移除字符串两端的空白字符，不改变中间内容
     static const char *kWhite = " \t\n\r\f\v";
     size_t idx = src_buf.find_first_not_of(kWhite);
     if (idx == std::string::npos) // size_t<-1>

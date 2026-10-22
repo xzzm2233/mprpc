@@ -2,7 +2,7 @@
 
 #include <chrono>
 
-// deadline 计算必须使用单调时钟，避免系统时间校准影响剩余预算。
+// deadline 计算必须使用单调时钟，避免系统时间校准影响剩余预算
 int64_t MprpcController::steadyNowNs()
 {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -22,13 +22,14 @@ MprpcController::~MprpcController()
 
 void MprpcController::Reset()
 {
-    // 清理状态和互斥量保护的数据，允许调用方复用 controller。
+    // 清理状态和互斥量保护的数据，允许调用方复用 controller
     m_failed.store(false, std::memory_order_relaxed);
     m_canceled.store(false, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(mu_);
         m_errText.clear();
         m_cancelCallback = nullptr;
+        m_cancelNotifications.clear();
     }
     rpcTimeoutMs_.store(0, std::memory_order_relaxed);
     deadlineMs_.store(0, std::memory_order_relaxed);
@@ -50,7 +51,7 @@ std::string MprpcController::ErrorText() const
 
 void MprpcController::SetFailed(const std::string &reason)
 {
-    // 先写入错误文本，再发布失败标记，保证并发读取能看到错误原因。
+    // 先写入错误文本，再发布失败标记，保证并发读取能看到错误原因
     {
         std::lock_guard<std::mutex> lock(mu_);
         m_errText = reason;
@@ -60,16 +61,28 @@ void MprpcController::SetFailed(const std::string &reason)
 
 void MprpcController::StartCancel()
 {
-    // 复制回调后在锁外执行，避免回调重入 controller 时死锁。
-    m_canceled.store(true, std::memory_order_release);
+    // 复制回调后在锁外执行，避免回调重入 controller 时死锁
+    if (m_canceled.exchange(true, std::memory_order_acq_rel))
+    {
+        return;
+    }
     std::function<void()> cb;
+    std::vector<google::protobuf::Closure *> notifications;
     {
         std::lock_guard<std::mutex> lock(mu_);
         cb = m_cancelCallback;
+        notifications.swap(m_cancelNotifications);
     }
     if (cb)
     {
         cb();
+    }
+    for (google::protobuf::Closure *callback : notifications)
+    {
+        if (callback)
+        {
+            callback->Run();
+        }
     }
 }
 
@@ -80,14 +93,47 @@ bool MprpcController::IsCanceled() const
 
 void MprpcController::setCancelCallback(std::function<void()> cb)
 {
-    std::lock_guard<std::mutex> lock(mu_);
-    m_cancelCallback = std::move(cb);
+    std::function<void()> notify;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (m_canceled.load(std::memory_order_acquire))
+        {
+            notify = std::move(cb);
+        }
+        else
+        {
+            m_cancelCallback = std::move(cb);
+        }
+    }
+    if (notify)
+    {
+        notify();
+    }
 }
 
 void MprpcController::NotifyOnCancel(google::protobuf::Closure *callback)
 {
-    // Protobuf 接口保留；当前实现通过 setCancelCallback 提供取消通知。
-    (void)callback;
+    if (!callback)
+    {
+        return;
+    }
+
+    bool runNow = false;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (m_canceled.load(std::memory_order_acquire))
+        {
+            runNow = true;
+        }
+        else
+        {
+            m_cancelNotifications.push_back(callback);
+        }
+    }
+    if (runNow)
+    {
+        callback->Run();
+    }
 }
 
 void MprpcController::SetRpcTimeoutMs(int64_t ms)
@@ -108,7 +154,7 @@ void MprpcController::SetDeadline(uint32_t deadlineMs)
 
 int64_t MprpcController::RemainingMs() const
 {
-    // 返回剩余预算；负值表示未设置 deadline，零表示已超时。
+    // 返回剩余预算；负值表示未设置 deadline，零表示已超时
     const int64_t budget = deadlineMs_.load(std::memory_order_relaxed);
     if (budget == 0)
     {

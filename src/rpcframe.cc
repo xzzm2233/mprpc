@@ -6,7 +6,7 @@
 #include <cstring>
 #include <limits>
 
-// 验证 protobuf 帧头字段间的约束，供收包和发包路径共用。
+// 验证 protobuf 帧头字段是否合法
 static bool IsValidRpcFrameHeader(const RpcFrameHeader &header)
 {
     if (header.args_size() > kRpcFrameMaxBodySize ||
@@ -21,14 +21,13 @@ static bool IsValidRpcFrameHeader(const RpcFrameHeader &header)
         return header.raw_size() != 0 && header.args_size() != 0;
     }
 
-    // raw_size == 0 is accepted for frames sent by the original protobuf client.
     return header.raw_size() == 0 || header.raw_size() == header.args_size();
 }
 
 bool DecodeRpcFrameHeader(const char *data, size_t len,
                           RpcFrameHeader *header)
 {
-    // ParseFromArray 接受 int 长度，先限制范围再转换。
+    // ParseFromArray 接受 int 长度，先限制范围再转换
     if (data == nullptr || header == nullptr || len == 0 ||
         len > kRpcFrameMaxHeaderSize ||
         len > static_cast<size_t>(std::numeric_limits<int>::max()))
@@ -45,7 +44,7 @@ bool DecodeRpcFrameHeader(const char *data, size_t len,
 size_t BeginEncodeRpcFrame(const RpcFrameHeader &header, size_t bodyLen,
                            std::string *out)
 {
-    // args_size 必须与实际 body 长度一致，避免帧长度字段和数据不符。
+    // args_size 必须与实际 body 长度一致，避免帧长度字段和数据不符
     if (out == nullptr || bodyLen > kRpcFrameMaxBodySize ||
         bodyLen > std::numeric_limits<uint32_t>::max() ||
         header.args_size() != bodyLen || !IsValidRpcFrameHeader(header))
@@ -73,7 +72,7 @@ size_t BeginEncodeRpcFrame(const RpcFrameHeader &header, size_t bodyLen,
 RpcFrameFeedResult FeedRpcFrame(const char *data, size_t readable,
                                 RpcFrame *frame)
 {
-    // 每次调用都从当前缓冲区起点继续推进保存的解析阶段。
+    // 每次调用都从当前缓冲区起点继续推进保存的解析阶段
     if (data == nullptr || frame == nullptr)
     {
         return RpcFrameFeedResult::kError;
@@ -130,7 +129,7 @@ size_t RpcFrameCompressBound(size_t srcLen)
 bool CompressRpcFrameBody(const void *src, size_t srcLen, void *dst,
                           size_t dstCap, int level, size_t *outLen)
 {
-    // Zstandard 错误码通过 ZSTD_isError 识别，不直接当作有效长度返回。
+    // Zstandard 错误码通过 ZSTD_isError 识别，不直接当作有效长度返回
     if (outLen == nullptr)
     {
         return false;
@@ -147,7 +146,7 @@ bool CompressRpcFrameBody(const void *src, size_t srcLen, void *dst,
 bool DecompressRpcFrameBody(const void *src, size_t srcLen, void *dst,
                             size_t dstCap, size_t *outLen)
 {
-    // 调用方负责按帧头声明的 raw_size 提供有界目标缓冲区。
+    // 调用方负责按帧头声明的 raw_size 提供有界目标缓冲区
     if (outLen == nullptr)
     {
         return false;

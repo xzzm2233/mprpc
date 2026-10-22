@@ -7,15 +7,20 @@
 
 #include <mymuduo/Logger.h>
 
+#include <zstd.h>
+
 #include <chrono>
+#include <cerrno>
+#include <climits>
+#include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <thread>
 #include <utility>
 
-// 每个 IO loop 线程独立维护连接解析状态；同一连接的事件固定由同一 loop 处理。
-// 每个 IO 线程自己的连接解析状态。
-// muduo 保证一条连接的读写事件固定落在同一个 loop 线程，因此无需加锁。
+// 每个 IO loop 线程独立维护连接解析状态；同一连接的事件固定由同一 loop 处理
+// 每个 IO 线程自己的连接解析状态
+// muduo 保证一条连接的读写事件固定落在同一个 loop 线程，因此无需加锁
 struct RpcProviderConnState
 {
     RpcFrame frame;
@@ -25,8 +30,7 @@ struct RpcProviderConnState
 static std::unordered_map<const TcpConnection *, RpcProviderConnState> &
 RpcProviderConnStates()
 {
-    static thread_local std::unordered_map<const TcpConnection *,
-                                          RpcProviderConnState> states;
+    static thread_local std::unordered_map<const TcpConnection *, RpcProviderConnState> states;
     return states;
 }
 
@@ -44,9 +48,28 @@ struct RpcProviderZkNode
     std::string data;
     bool ephemeral;
 };
+
+static int LoadBoundedInt(MprpcConfig &config, const std::string &key,
+                          int defaultValue, int minimum, int maximum)
+{
+    const int value = config.LoadInt(key, defaultValue);
+    if (value < minimum || value > maximum)
+    {
+        LOG_ERROR("config [%s]=%d outside valid range [%d,%d], using %d",
+                  key.c_str(), value, minimum, maximum, defaultValue);
+        return defaultValue;
+    }
+    return value;
+}
+
 void RpcProvider::NotifyService(google::protobuf::Service *service)
 {
-    // 注册服务描述符和方法表；Run() 启动后这些表只读。
+    // 注册服务描述符和方法表；Run() 启动后这些表只读
+    if (!service)
+    {
+        LOG_ERROR("cannot register a null protobuf service");
+        return;
+    }
     const google::protobuf::ServiceDescriptor *serviceDesc = service->GetDescriptor();
 
     ServiceInfo info;
@@ -61,12 +84,15 @@ void RpcProvider::NotifyService(google::protobuf::Service *service)
         LOG_INFO("method_name:%s:", methodDesc->name().c_str());
     }
 
-    m_serviceMap.emplace(info.name, std::move(info));
+    if (!m_serviceMap.emplace(info.name, std::move(info)).second)
+    {
+        LOG_ERROR("duplicate protobuf service registration: %s", serviceDesc->name().c_str());
+    }
 }
 
 void RpcProvider::Run()
 {
-    // 先加载资源限制和线程配置，再启动依赖服务的网络监听。
+    // 先加载资源限制和线程配置，再启动依赖服务的网络监听
     auto &cfg = MprpcApplication::GetInstance().GetConfig();
 
     const std::string ip = cfg.Load("rpcserverip");
@@ -76,21 +102,34 @@ void RpcProvider::Run()
         LOG_ERROR("rpcserverip/rpcserverport not configured");
         exit(EXIT_FAILURE);
     }
-    const uint16_t port = static_cast<uint16_t>(std::atoi(portStr.c_str()));
+    errno = 0;
+    char *portEnd = nullptr;
+    const long parsedPort = std::strtol(portStr.c_str(), &portEnd, 10);
+    if (errno == ERANGE || portEnd == portStr.c_str() || *portEnd != '\0' ||
+        parsedPort < 1 || parsedPort > 65535)
+    {
+        LOG_ERROR("invalid rpcserverport: %s", portStr.c_str());
+        exit(EXIT_FAILURE);
+    }
+    const uint16_t port = static_cast<uint16_t>(parsedPort);
 
-    // ---- 运行期配置（全部有默认值，老配置文件无需改动）----
-    m_ioThreads = cfg.LoadInt("rpcserveriothreads", 4);
-    m_maxInflight = cfg.LoadInt("rpcmaxinflight", 1024);
-    m_highWater = static_cast<size_t>(cfg.LoadInt("rpchighwater", 8 * 1024 * 1024));
+    m_ioThreads = LoadBoundedInt(cfg, "rpcserveriothreads", 4, 1, 256);
+    m_maxInflight = LoadBoundedInt(cfg, "rpcmaxinflight", 1024, 1, INT_MAX);
+    m_highWater = static_cast<size_t>(
+        LoadBoundedInt(cfg, "rpchighwater", 8 * 1024 * 1024, 1, INT_MAX));
     m_compress = cfg.LoadBool("rpccompress", true);
-    m_compressLevel = cfg.LoadInt("rpccompresslevel", 3);
-    m_compressMin = static_cast<size_t>(cfg.LoadInt("rpccompressmin", 8 * 1024));
-    m_metricsInterval = cfg.LoadInt("rpcmetricsinterval", 10);
+    m_compressLevel = LoadBoundedInt(cfg, "rpccompresslevel", 3,
+                                     ZSTD_minCLevel(), ZSTD_maxCLevel());
+    m_compressMin = static_cast<size_t>(
+        LoadBoundedInt(cfg, "rpccompressmin", 8 * 1024, 0, INT_MAX));
+    m_metricsInterval = LoadBoundedInt(cfg, "rpcmetricsinterval", 10, 0, INT_MAX);
 
     const unsigned hw = std::thread::hardware_concurrency();
-    const int defaultWorkers = hw ? static_cast<int>(hw * 2) : 8;
-    const int workers = cfg.LoadInt("rpcworkers", defaultWorkers);
-    const int workerQueue = cfg.LoadInt("rpcworkerqueue", 4096);
+    const int defaultWorkers = hw && hw <= static_cast<unsigned>(INT_MAX / 2)
+                                   ? static_cast<int>(hw * 2)
+                                   : 8;
+    const int workers = LoadBoundedInt(cfg, "rpcworkers", defaultWorkers, 1, 4096);
+    const int workerQueue = LoadBoundedInt(cfg, "rpcworkerqueue", 4096, 1, INT_MAX);
 
     m_workers.reset(new RpcThreadPool(static_cast<size_t>(workers),
                                       static_cast<size_t>(workerQueue)));
@@ -111,8 +150,8 @@ void RpcProvider::Run()
     const bool useZk = cfg.LoadBool("zooenabled", !cfg.Load("zookeeperip", "").empty());
     if (useZk)
     {
-        // 注册内容在启动时一次性算好并按值捕获：会话回调跑在 ZK 线程上，
-        // 不再依赖 this，因此 provider 销毁后回调也不会踩野指针。
+        // 注册内容在启动时一次性算好并按值捕获：会话回调由 ZK 工作线程执行
+        // 不再依赖 this，因此 provider 销毁后回调也不会踩野指针
         auto nodes = std::make_shared<std::vector<RpcProviderZkNode>>();
         const std::string ep = ip + ":" + portStr;
         for (auto &sp : m_serviceMap)
@@ -127,7 +166,8 @@ void RpcProvider::Run()
         }
 
         ZkClient &zk = ZkClient::global();
-        zk.addSessionCallback(this, [nodes](bool isReconnect) {
+        zk.addSessionCallback(this, [nodes](bool isReconnect)
+                              {
             if (isReconnect)
             {
                 LOG_INFO("zookeeper session re-established, re-registering ephemeral nodes");
@@ -138,10 +178,14 @@ void RpcProvider::Run()
                                           n.data.empty() ? nullptr : n.data.c_str(),
                                           static_cast<int>(n.data.size()),
                                           n.ephemeral ? ZOO_EPHEMERAL : 0);
-            }
-        });
+            } });
 
-        const double zkTimeout = cfg.LoadDouble("rpczkconnecttimeout", 10.0);
+        double zkTimeout = cfg.LoadDouble("rpczkconnecttimeout", 10.0);
+        if (!std::isfinite(zkTimeout) || zkTimeout <= 0.0)
+        {
+            LOG_ERROR("invalid rpczkconnecttimeout=%.3f, using 10 seconds", zkTimeout);
+            zkTimeout = 10.0;
+        }
         if (!zk.Start(zkTimeout))
         {
             // 句柄仍在后台重试：ZK 恢复后会话建立会自动补注册
@@ -157,7 +201,8 @@ void RpcProvider::Run()
 
     if (m_metricsInterval > 0)
     {
-        m_eventLoop.runEvery(m_metricsInterval, [this]() { DumpMetrics(); });
+        m_eventLoop.runEvery(m_metricsInterval, [this]()
+                             { DumpMetrics(); });
     }
 
     LOG_INFO("RpcProvider start service at ip:%s port:%u iothreads=%d workers=%d "
@@ -180,7 +225,7 @@ void RpcProvider::Run()
 
 void RpcProvider::OnConnection(const TcpConnectionPtr &conn)
 {
-    // 新连接初始化解析状态；关闭时清除线程本地状态。
+    // 新连接初始化解析状态；关闭时清除线程本地状态
     if (conn->connected())
     {
         RpcProviderConnState &st = RpcProviderConnStates()[conn.get()];
@@ -192,8 +237,12 @@ void RpcProvider::OnConnection(const TcpConnectionPtr &conn)
 
         // 背压：对端不消费时限制积压，避免 outputBuffer 无限增长
         conn->setHighWaterMarkCallback(
-            [this](const TcpConnectionPtr &c, size_t mark) { OnHighWater(c, mark); },
+            [this](const TcpConnectionPtr &c, size_t mark)
+            { OnHighWater(c, mark); },
             m_highWater);
+        conn->setWriteCompleteCallback(
+            [this](const TcpConnectionPtr &c)
+            { OnWriteComplete(c); });
 
         LOG_INFO("new connection: %s", conn->peerAddress().toIpPort().c_str());
     }
@@ -206,7 +255,7 @@ void RpcProvider::OnConnection(const TcpConnectionPtr &conn)
 
 void RpcProvider::OnHighWater(const TcpConnectionPtr &conn, size_t mark)
 {
-    // 输出缓存持续增长时对该连接限流，反复触发则关闭连接。
+    // 输出缓存持续增长时对该连接限流，反复触发则关闭连接
     auto it = RpcProviderConnStates().find(conn.get());
     if (it == RpcProviderConnStates().end() || !it->second.stats)
     {
@@ -230,15 +279,27 @@ void RpcProvider::OnHighWater(const TcpConnectionPtr &conn, size_t mark)
              mark, conn->peerAddress().toIpPort().c_str());
 }
 
+void RpcProvider::OnWriteComplete(const TcpConnectionPtr &conn)
+{
+    auto it = RpcProviderConnStates().find(conn.get());
+    if (it == RpcProviderConnStates().end() || !it->second.stats)
+    {
+        return;
+    }
+    it->second.stats->highWaterHits = 0;
+    it->second.stats->overloaded.store(false, std::memory_order_relaxed);
+}
+
 void RpcProvider::OnMessage(const TcpConnectionPtr &conn,
                             Buffer *buffer,
                             Timestamp time)
 {
-    // 一次读事件中尽可能消费所有完整帧，尾部不完整数据留待下次继续解析。
+    // 一次读事件中尽可能消费所有完整帧，尾部不完整数据留待下次继续解析
     (void)time;
 
     RpcProviderConnState &st = RpcProviderConnStates()[conn.get()];
-    if (!st.stats) st.stats = std::make_shared<RpcConnStats>();
+    if (!st.stats)
+        st.stats = std::make_shared<RpcConnStats>();
 
     for (;;)
     {
@@ -280,7 +341,7 @@ void RpcProvider::ProcessRequest(const TcpConnectionPtr &conn,
                                  const std::string &args,
                                  int64_t startNs)
 {
-    // 校验准入、deadline、服务方法及 protobuf body 后再投递业务线程池。
+    // 校验准入、deadline、服务方法及 protobuf body 后再投递业务线程池
     const RpcFrameHeader &header = frame.header;
     const uint64_t reqId = header.req_id();
     const uint64_t traceId = header.trace_id();
@@ -384,8 +445,6 @@ void RpcProvider::ProcessRequest(const TcpConnectionPtr &conn,
     ctx->methodKey = methodKey;
     ctx->startNs = startNs;
     ctx->deadlineNs = deadlineNs;
-    ctx->service = service;
-    ctx->method = method;
     ctx->request = std::move(request);
     ctx->response = std::move(response);
     ctx->controller.reset(controller);
@@ -397,10 +456,25 @@ void RpcProvider::ProcessRequest(const TcpConnectionPtr &conn,
     google::protobuf::Closure *done =
         google::protobuf::NewCallback(this, &RpcProvider::OnResponse, ctx);
 
-    const bool queued = m_workers->submit([service, method, ctx, done]() {
-        service->CallMethod(method, ctx->controller.get(),
-                            ctx->request.get(), ctx->response.get(), done);
-    });
+    const bool queued = m_workers->submit([service, method, ctx, done]()
+                                          {
+                                              try
+                                              {
+                                                  service->CallMethod(method, ctx->controller.get(),
+                                                                      ctx->request.get(), ctx->response.get(), done);
+                                              }
+                                              catch (const std::exception &e)
+                                              {
+                                                  ctx->controller->SetFailed(
+                                                      std::string("service handler threw: ") + e.what());
+                                                  done->Run();
+                                              }
+                                              catch (...)
+                                              {
+                                                  ctx->controller->SetFailed("service handler threw");
+                                                  done->Run();
+                                              }
+                                          });
 
     if (!queued)
     {
@@ -416,7 +490,7 @@ void RpcProvider::ProcessRequest(const TcpConnectionPtr &conn,
 
 void RpcProvider::OnResponse(RpcContext *ctx)
 {
-    // 业务闭包可能在任意工作线程执行，TcpConnection::send 会负责跨线程投递。
+    // 业务闭包可能在任意工作线程执行，TcpConnection::send 会负责跨线程投递
     const int64_t now = RpcProviderSteadyNowNs();
     const int64_t latency = now - ctx->startNs;
 
@@ -452,7 +526,7 @@ void RpcProvider::OnResponse(RpcContext *ctx)
 void RpcProvider::SendResponse(const TcpConnectionPtr &conn, uint64_t reqId, uint64_t traceId,
                                google::protobuf::Message *response)
 {
-    // 先尝试压缩大响应；压缩失败或未变小时回退到原始 protobuf body。
+    // 先尝试压缩大响应；压缩失败或未变小时回退到原始 protobuf body
     const size_t rawSize = response->ByteSizeLong();
     if (rawSize > kRpcFrameMaxBodySize)
     {
@@ -514,7 +588,7 @@ void RpcProvider::SendResponse(const TcpConnectionPtr &conn, uint64_t reqId, uin
 void RpcProvider::SendError(const TcpConnectionPtr &conn, uint64_t reqId, uint64_t traceId,
                             int32_t errCode, const std::string &errMsg)
 {
-    // 错误响应不携带 body，错误文本放在 protobuf 帧头中。
+    // 错误响应不携带 body，错误文本放在 protobuf 帧头中
     RpcFrameHeader h;
     h.set_req_id(reqId);
     h.set_trace_id(traceId);
@@ -533,6 +607,6 @@ void RpcProvider::SendError(const TcpConnectionPtr &conn, uint64_t reqId, uint64
 
 void RpcProvider::DumpMetrics()
 {
-    // 定时器在 IO loop 中触发，指标快照自身使用原子计数读取。
+    // 定时器在 IO loop 中触发，指标快照自身使用原子计数读取
     RpcMetrics::instance().dump();
 }

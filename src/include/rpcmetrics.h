@@ -1,6 +1,6 @@
 #pragma once
-// 轻量 RPC 指标：按方法统计 QPS / 错误 / 超时 / 在途数 / 延迟分位数。
-// 全进程单例，无锁读取（entry 创建后地址稳定），dump 输出到日志。
+// 轻量 RPC 指标：按方法统计 QPS / 错误 / 超时 / 在途数 / 延迟分位数
+// 全进程单例，无锁读取（entry 创建后地址稳定），dump 输出到日志
 
 #include <atomic>
 #include <cstdint>
@@ -15,11 +15,11 @@ class RpcMetrics
 public:
     static RpcMetrics &instance();
 
-    // scope 区分 client/server；method 为服务方法或内部事件名。
+    // scope 区分 client/server；method 为服务方法或内部事件名
     void record(const std::string &scope, const std::string &method,
                 int64_t latencyNs, bool ok, bool timeout, bool busy);
 
-    // 维护按 scope 和方法区分的当前在途数及峰值。
+    // 维护按 scope 和方法区分的当前在途数及峰值
     void inflightUp(const std::string &scope, const std::string &method);
     void inflightDown(const std::string &scope, const std::string &method);
 

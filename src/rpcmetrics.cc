@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cmath>
 
-// 将纳秒延迟映射到对数直方图桶，超出范围时落入边界桶。
+// 将纳秒延迟映射到对数直方图桶，超出范围时落入边界桶
 int RpcMetrics::bucketOf(int64_t ns)
 {
     if (ns < 1)
@@ -25,7 +25,7 @@ int RpcMetrics::bucketOf(int64_t ns)
 
 RpcMetrics &RpcMetrics::instance()
 {
-    // 函数局部静态对象确保惰性初始化且线程安全。
+    // 函数局部静态对象确保惰性初始化且线程安全
     static RpcMetrics m;
     return m;
 }
@@ -33,7 +33,7 @@ RpcMetrics &RpcMetrics::instance()
 RpcMetrics::Entry *RpcMetrics::get(const std::string &scope,
                                    const std::string &method)
 {
-    // Entry 创建后由 unique_ptr 固定持有，返回的地址在后续插入中保持稳定。
+    // Entry 创建后由 unique_ptr 固定持有，返回的地址在后续插入中保持稳定
     std::string key(scope);
     key.push_back('|');
     key.append(method);
@@ -57,7 +57,7 @@ RpcMetrics::Entry *RpcMetrics::get(const std::string &scope,
 void RpcMetrics::record(const std::string &scope, const std::string &method,
                         int64_t latencyNs, bool ok, bool timeout, bool busy)
 {
-    // 原子计数允许多个 IO/业务线程并发记录同一方法指标。
+    // 原子计数允许多个 IO/业务线程并发记录同一方法指标
     Entry *e = get(scope, method);
     e->calls.fetch_add(1, std::memory_order_relaxed);
     if (busy)
@@ -108,7 +108,7 @@ void RpcMetrics::inflightDown(const std::string &scope, const std::string &metho
 
 void RpcMetrics::dump()
 {
-    // 先在锁内复制稳定的 Entry 指针，再锁外读取并记录快照。
+    // 先在锁内复制稳定的 Entry 指针，再锁外读取并记录快照
     std::vector<std::pair<std::string, Entry *>> snapshot;
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -142,8 +142,9 @@ void RpcMetrics::dump()
         }
 
         // 用直方图分位数（上界），hist 为 0 时给 -1
-        // 直方图只提供分桶上界的近似分位数。
-        auto quantile = [&](double q) -> int64_t {
+        // 直方图只提供分桶上界的近似分位数
+        auto quantile = [&](double q) -> int64_t
+        {
             if (hist == 0)
             {
                 return -1;

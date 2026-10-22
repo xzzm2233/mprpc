@@ -1,6 +1,6 @@
 #pragma once
-// 有界业务线程池：把耗时的业务 handler 从 IO 线程剥离。
-// 队列满时 submit 返回 false，由上层做准入控制（返回 429）。
+// 有界业务线程池：把耗时的业务 handler 从 IO 线程剥离
+// 队列满时 submit 返回 false，由上层做准入控制（返回 429）
 
 #include <atomic>
 #include <condition_variable>
@@ -13,7 +13,7 @@
 class RpcThreadPool
 {
 public:
-    // maxQueue 限制等待执行的任务数，不包含正在运行的任务。
+    // maxQueue 限制等待执行的任务数，不包含正在运行的任务
     RpcThreadPool(size_t threadNum, size_t maxQueue);
     ~RpcThreadPool();
 

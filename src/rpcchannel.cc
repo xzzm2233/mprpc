@@ -11,7 +11,7 @@
 
 static const int64_t kMprpcChannelDefaultTimeoutMs = 30000;
 
-// MprpcChannel 通过 RpcChannel 提供异步请求/响应映射。
+// MprpcChannel 通过 RpcChannel 提供异步请求/响应映射
 MprpcChannel::MprpcChannel(EventLoop *loop, const InetAddress &serverAddr)
     : loop_(loop),
       client_(loop, serverAddr, "MprpcChannel"),
@@ -37,6 +37,29 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
                               google::protobuf::Message *response,
                               google::protobuf::Closure *done)
 {
+    if (!method || !request || !response)
+    {
+        if (controller)
+        {
+            controller->SetFailed("invalid RPC method or message");
+        }
+        if (done)
+        {
+            done->Run();
+        }
+        return;
+    }
+
+    if (controller && controller->IsCanceled())
+    {
+        controller->SetFailed("rpc canceled");
+        if (done)
+        {
+            done->Run();
+        }
+        return;
+    }
+
     const uint64_t req_id = m_reqId++;
 
     RpcFrameHeader header;
@@ -105,9 +128,36 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
         std::memcpy(&packet[bodyOffset], args.data(), args.size());
     }
 
+    std::weak_ptr<MprpcChannel> weak_this;
+    try
+    {
+        weak_this = shared_from_this();
+    }
+    catch (const std::bad_weak_ptr &)
+    {
+        if (controller)
+        {
+            controller->SetFailed("MprpcChannel must be owned by std::shared_ptr");
+        }
+        if (done)
+        {
+            done->Run();
+        }
+        return;
+    }
+
+    auto call = std::make_shared<PendingCall>();
+    call->controller = controller;
+    call->response = response;
+    call->done = done;
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_pendingCalls[req_id] = call;
+    }
+
     if (auto *ctrl = dynamic_cast<MprpcController *>(controller))
     {
-        std::weak_ptr<MprpcChannel> weak_this = weak_from_this();
         ctrl->setCancelCallback(
             [weak_this, req_id]()
             {
@@ -118,8 +168,7 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
             });
     }
 
-    std::weak_ptr<MprpcChannel> weak_this = weak_from_this();
-    // 注册超时定时器
+    // 先发布 pending 项，避免极短定时器在注册请求前触发并丢失超时事件
     TimerId timer = loop_->runAfter(
         static_cast<double>(timeoutMs) / 1000.0,
         [weak_this, req_id]()
@@ -129,44 +178,35 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
                 self->onTimeout(req_id);
             }
         });
-
-    auto call = std::make_shared<PendingCall>();
-    call->controller = controller;
-    call->response = response;
-    call->done = done;
-    call->timerId = timer;
-
+    bool stillPending = false;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        m_pendingCalls[req_id] = call;
+        auto it = m_pendingCalls.find(req_id);
+        if (it != m_pendingCalls.end() && it->second == call)
+        {
+            call->timerId = timer;
+            stillPending = true;
+        }
+    }
+    if (!stillPending)
+    {
+        loop_->cancel(timer);
+        return;
     }
 
     TcpConnectionPtr conn = client_.connection();
-    if (conn && conn->connected())
-    {
-        conn->send(packet);
-    }
-    else
-    {
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_pendingCalls.erase(req_id);
-        }
-        loop_->cancel(timer);
-        if (controller)
-        {
-            controller->SetFailed("connection not ready");
-        }
-        if (done)
-        {
-            done->Run();
-        }
-    }
+    loop_->queueInLoop([weak_this, req_id, conn, packet]()
+                       {
+                           if (auto self = weak_this.lock())
+                           {
+                               self->sendRequestInLoop(req_id, conn, packet);
+                           }
+                       });
 }
 
 void MprpcChannel::onConnection(const TcpConnectionPtr &conn)
 {
-    // 断线时所有在途请求都无法再收到响应，统一取消定时器并通知调用方。
+    // 断线时所有在途请求都无法再收到响应，统一取消定时器并通知调用方
     if (conn->connected())
     {
         responseFrame_.reset();
@@ -185,21 +225,21 @@ void MprpcChannel::onConnection(const TcpConnectionPtr &conn)
         }
         for (auto &kv : pending)
         {
-            loop_->cancel(kv.second.get()->timerId);
-            if (kv.second.get()->controller)
+            loop_->cancel(kv.second->timerId);
+            if (kv.second->controller)
             {
-                kv.second.get()->controller->SetFailed("connection closed");
+                kv.second->controller->SetFailed("connection closed");
             }
-            if (kv.second.get()->done)
+            if (kv.second->done)
             {
-                kv.second.get()->done->Run();
+                kv.second->done->Run();
             }
         }
     }
 }
 void MprpcChannel::onMessage(const TcpConnectionPtr &conn, Buffer *buffer, Timestamp time)
 {
-    // 响应按帧增量解析；完整帧可能一次收到多条。
+    // 响应按帧增量解析；完整帧可能一次收到多条
     (void)time;
     for (;;)
     {
@@ -252,109 +292,136 @@ void MprpcChannel::onMessage(const TcpConnectionPtr &conn, Buffer *buffer, Times
 void MprpcChannel::onResponse(const RpcFrameHeader &header,
                               const std::string &body)
 {
-    // req_id 将响应关联到原始调用；查找不到时说明调用已超时或取消。
+    // req_id 将响应关联到原始调用；查找不到时说明调用已超时或取消
     uint64_t req_id = header.req_id();
 
-    std::shared_ptr<PendingCall> call;
+    std::shared_ptr<PendingCall> call = takePendingCall(req_id);
+    if (!call)
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        auto it = m_pendingCalls.find(req_id);
-        if (it == m_pendingCalls.end())
-        {
-            LOG_INFO("no pending call for req_id=%lu", (unsigned long)req_id);
-            return;
-        }
-        call = it->second;
-        if (call.get()->isFinished.exchange(true))
-        {
-            return;
-        }
-
-        m_pendingCalls.erase(it);
+        LOG_INFO("no pending call for req_id=%lu", (unsigned long)req_id);
+        return;
     }
 
-    loop_->cancel(call.get()->timerId);
+    loop_->cancel(call->timerId);
 
     if (header.err_code() != 0)
     {
-        if (call.get()->controller)
-            call.get()->controller->SetFailed(header.err_msg());
+        if (call->controller)
+            call->controller->SetFailed(header.err_msg());
     }
     else
     {
-        if (!call.get()->response->ParseFromString(body))
+        if (!call->response->ParseFromString(body))
         {
-            if (call.get()->controller)
-                call.get()->controller->SetFailed("parse response error");
+            if (call->controller)
+                call->controller->SetFailed("parse response error");
         }
     }
 
-    if (call.get()->done)
+    if (call->done)
     {
-        call.get()->done->Run();
+        call->done->Run();
+    }
+}
+
+std::shared_ptr<MprpcChannel::PendingCall>
+MprpcChannel::takePendingCall(uint64_t req_id)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_pendingCalls.find(req_id);
+    if (it == m_pendingCalls.end())
+    {
+        return std::shared_ptr<PendingCall>();
+    }
+
+    std::shared_ptr<PendingCall> call = it->second;
+    m_pendingCalls.erase(it);
+    return call;
+}
+
+void MprpcChannel::sendRequestInLoop(uint64_t req_id,
+                                     const TcpConnectionPtr &conn,
+                                     const std::string &packet)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_pendingCalls.find(req_id) == m_pendingCalls.end())
+        {
+            return;
+        }
+    }
+
+    if (conn && conn->connected())
+    {
+        conn->send(packet);
+        return;
+    }
+
+    std::shared_ptr<PendingCall> call = takePendingCall(req_id);
+    if (!call)
+    {
+        return;
+    }
+    loop_->cancel(call->timerId);
+    if (call->controller)
+    {
+        call->controller->SetFailed("connection not ready");
+    }
+    if (call->done)
+    {
+        call->done->Run();
     }
 }
 
 void MprpcChannel::onCancelCallback(uint64_t req_id)
 {
-    // RpcController 可能从任意调用线程发起取消，切回网络 loop 处理状态。
-    loop_->queueInLoop(
-        std::bind(&MprpcChannel::cancelInLoop, this, req_id));
+    // RpcController 可能从任意调用线程发起取消，切回网络 loop 处理状态
+    std::weak_ptr<MprpcChannel> weak_this = shared_from_this();
+    loop_->queueInLoop([weak_this, req_id]()
+                       {
+                           if (auto self = weak_this.lock())
+                           {
+                               self->cancelInLoop(req_id);
+                           }
+                       });
 }
 
 void MprpcChannel::cancelInLoop(uint64_t req_id)
 {
-    // 删除 pending 项后再运行 done，避免回调重入时重复完成。
-    std::shared_ptr<PendingCall> call;
+    // 删除 pending 项后再运行 done，避免回调重入时重复完成
+    std::shared_ptr<PendingCall> call = takePendingCall(req_id);
+    if (!call)
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        auto it = m_pendingCalls.find(req_id);
-        if (it == m_pendingCalls.end())
-        {
-            return;
-        }
-        call = it->second;
-        m_pendingCalls.erase(it);
+        return;
     }
 
-    loop_->cancel(call.get()->timerId);
+    loop_->cancel(call->timerId);
 
-    if (call.get()->controller)
+    if (call->controller)
     {
-        call.get()->controller->SetFailed("rpc canceled");
+        call->controller->SetFailed("rpc canceled");
     }
-    if (call.get()->done)
+    if (call->done)
     {
-        call.get()->done->Run();
+        call->done->Run();
     }
 }
 
 void MprpcChannel::onTimeout(uint64_t req_id)
 {
-    // 定时器与响应在同一 loop 线程竞争，只有先取出 pending 的一方完成调用。
-    std::shared_ptr<PendingCall> call;
+    // 定时器与响应在同一 loop 线程竞争，只有先取出 pending 的一方完成调用
+    std::shared_ptr<PendingCall> call = takePendingCall(req_id);
+    if (!call)
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        auto it = m_pendingCalls.find(req_id);
-        if (it == m_pendingCalls.end())
-        {
-            return;
-        }
-        call = it->second;
-        if (call->isFinished.exchange(true))
-        {
-            return;
-        }
-
-        m_pendingCalls.erase(it);
+        return;
     }
 
-    if (call.get()->controller)
+    if (call->controller)
     {
-        call.get()->controller->SetFailed("rpc timeout");
+        call->controller->SetFailed("rpc timeout");
     }
-    if (call.get()->done)
+    if (call->done)
     {
-        call.get()->done->Run();
+        call->done->Run();
     }
 }
