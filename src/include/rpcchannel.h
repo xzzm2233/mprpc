@@ -18,6 +18,8 @@
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 class MprpcController;
 
@@ -44,8 +46,7 @@ private:
     void onMessage(const TcpConnectionPtr &conn, Buffer *buffer, Timestamp time);
     void onResponse(const RpcFrameHeader &header, const std::string &body);
     std::shared_ptr<PendingCall> takePendingCall(uint64_t req_id);
-    void sendRequestInLoop(uint64_t req_id, const TcpConnectionPtr &conn,
-                           const std::string &packet);
+    void sendRequestInLoop(uint64_t req_id, const std::string &packet);
 
     // 将取消、超时事件切回 EventLoop 线程处理
     void onCancelCallback(uint64_t req_id);
@@ -59,6 +60,8 @@ private:
         google::protobuf::Message *response;
         google::protobuf::Closure *done;
         TimerId timerId;
+        bool queued = false;
+        bool sent = false;
     };
 
     EventLoop *loop_; // 非拥有指针，生命周期由创建方保证
@@ -68,4 +71,7 @@ private:
     std::mutex m_mutex;               // 保护跨线程访问的待完成调用表
     std::unordered_map<uint64_t, std::shared_ptr<PendingCall>> m_pendingCalls;
     RpcFrame responseFrame_; // 按连接保留响应半包解析进度
+
+    // 暂存尚未发送的请求包，连接建立后按 req_id 检查 pending 状态再发送。
+    std::vector<std::pair<uint64_t, std::string>> m_unsentPackets;
 };

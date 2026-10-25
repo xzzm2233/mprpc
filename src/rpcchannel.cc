@@ -194,14 +194,12 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
         return;
     }
 
-    TcpConnectionPtr conn = client_.connection();
-    loop_->queueInLoop([weak_this, req_id, conn, packet]()
+    loop_->queueInLoop([weak_this, req_id, packet]()
                        {
                            if (auto self = weak_this.lock())
                            {
-                               self->sendRequestInLoop(req_id, conn, packet);
-                           }
-                       });
+                               self->sendRequestInLoop(req_id, packet);
+                           } });
 }
 
 void MprpcChannel::onConnection(const TcpConnectionPtr &conn)
@@ -211,6 +209,17 @@ void MprpcChannel::onConnection(const TcpConnectionPtr &conn)
     {
         responseFrame_.reset();
         LOG_INFO("MprpcChannel connected to %s", conn->peerAddress().toIpPort().c_str());
+
+        std::vector<std::pair<uint64_t, std::string>> unsent;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            unsent.swap(m_unsentPackets);
+        }
+
+        for (const auto &kv : unsent)
+        {
+            sendRequestInLoop(kv.first, kv.second);
+        }
     }
     else
     {
@@ -218,21 +227,32 @@ void MprpcChannel::onConnection(const TcpConnectionPtr &conn)
         LOG_INFO("MprpcChannel disconnected from %s",
                  conn->peerAddress().toIpPort().c_str());
 
-        std::unordered_map<uint64_t, std::shared_ptr<PendingCall>> pending;
+        std::vector<std::shared_ptr<PendingCall>> pending;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            pending.swap(m_pendingCalls);
-        }
-        for (auto &kv : pending)
-        {
-            loop_->cancel(kv.second->timerId);
-            if (kv.second->controller)
+            for (auto it = m_pendingCalls.begin(); it != m_pendingCalls.end();)
             {
-                kv.second->controller->SetFailed("connection closed");
+                if (it->second->sent)
+                {
+                    pending.push_back(it->second);
+                    it = m_pendingCalls.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
             }
-            if (kv.second->done)
+        }
+        for (const auto &call : pending)
+        {
+            loop_->cancel(call->timerId);
+            if (call->controller)
             {
-                kv.second->done->Run();
+                call->controller->SetFailed("connection closed");
+            }
+            if (call->done)
+            {
+                call->done->Run();
             }
         }
     }
@@ -336,40 +356,41 @@ MprpcChannel::takePendingCall(uint64_t req_id)
 
     std::shared_ptr<PendingCall> call = it->second;
     m_pendingCalls.erase(it);
+    m_unsentPackets.erase(
+        std::remove_if(m_unsentPackets.begin(), m_unsentPackets.end(),
+                       [req_id](const std::pair<uint64_t, std::string> &packet)
+                       { return packet.first == req_id; }),
+        m_unsentPackets.end());
     return call;
 }
 
-void MprpcChannel::sendRequestInLoop(uint64_t req_id,
-                                     const TcpConnectionPtr &conn,
-                                     const std::string &packet)
+void MprpcChannel::sendRequestInLoop(uint64_t req_id, const std::string &packet)
 {
+    TcpConnectionPtr conn = client_.connection();
+    bool shouldSend = false;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_pendingCalls.find(req_id) == m_pendingCalls.end())
+        auto it = m_pendingCalls.find(req_id);
+        if (it == m_pendingCalls.end() || it->second->sent)
         {
             return;
         }
+        if (conn && conn->connected())
+        {
+            it->second->queued = false;
+            it->second->sent = true;
+            shouldSend = true;
+        }
+        else if (!it->second->queued)
+        {
+            it->second->queued = true;
+            m_unsentPackets.push_back(std::make_pair(req_id, packet));
+        }
     }
 
-    if (conn && conn->connected())
+    if (shouldSend)
     {
         conn->send(packet);
-        return;
-    }
-
-    std::shared_ptr<PendingCall> call = takePendingCall(req_id);
-    if (!call)
-    {
-        return;
-    }
-    loop_->cancel(call->timerId);
-    if (call->controller)
-    {
-        call->controller->SetFailed("connection not ready");
-    }
-    if (call->done)
-    {
-        call->done->Run();
     }
 }
 
@@ -382,8 +403,7 @@ void MprpcChannel::onCancelCallback(uint64_t req_id)
                            if (auto self = weak_this.lock())
                            {
                                self->cancelInLoop(req_id);
-                           }
-                       });
+                           } });
 }
 
 void MprpcChannel::cancelInLoop(uint64_t req_id)

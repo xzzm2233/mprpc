@@ -32,7 +32,7 @@ ZkClient &ZkClient::global()
 
 void ZkClient::sessionWatcher(zhandle_t *, int type, int state, const char *, void *watcherCtx)
 {
-    // ZooKeeper 原生会话回调入口，不在此线程执行阻塞操作。
+    // ZooKeeper 原生会话回调入口，不在此线程执行阻塞操作
     if (type != ZOO_SESSION_EVENT)
     {
         return;
@@ -46,7 +46,7 @@ void ZkClient::sessionWatcher(zhandle_t *, int type, int state, const char *, vo
 
 void ZkClient::childrenWatcher(zhandle_t *, int type, int state, const char *path, void *watcherCtx)
 {
-    // Watch 是一次性的；触发后转发订阅回调，由订阅方重新读取以续订。
+    // Watch 是一次性的；触发后转发订阅回调，由订阅方重新读取以续订
     (void)state;
     (void)path;
     if (type == ZOO_SESSION_EVENT)
@@ -61,7 +61,7 @@ void ZkClient::childrenWatcher(zhandle_t *, int type, int state, const char *pat
     }
     ZkClient *self = wc->self;
 
-    // 先复制回调并释放锁，再排队，避免在 ZooKeeper 原生 IO 线程调用同步 API。
+    // 先复制回调并释放锁，再排队，避免在 ZooKeeper 原生 IO 线程调用同步 API
     std::function<void()> fn;
     {
         std::lock_guard<std::mutex> lock(self->watchMu_);
@@ -77,7 +77,7 @@ void ZkClient::childrenWatcher(zhandle_t *, int type, int state, const char *pat
 
 void ZkClient::handleSessionEvent(int state)
 {
-    // 连接成功唤醒 Start() 等待者；重连恢复与用户通知在后台线程排队执行。
+    // 连接成功唤醒 Start() 等待者；重连恢复与用户通知在后台线程排队执行
     if (state == ZOO_CONNECTED_STATE)
     {
         bool isReconnect = false;
@@ -116,7 +116,7 @@ void ZkClient::handleSessionEvent(int state)
 
 void ZkClient::invokeSessionCallbacks(bool isReconnect)
 {
-    // 锁内快照、锁外调用，允许回调安全地注册或移除其他订阅。
+    // 锁内快照、锁外调用，允许回调安全地注册或移除其他订阅
     std::vector<std::pair<void *, SessionCallback>> copy;
     {
         std::lock_guard<std::mutex> lock(cbMu_);
@@ -149,7 +149,7 @@ void ZkClient::removeSessionCallbacks(void *owner)
 
 void ZkClient::removeWatch(const char *path)
 {
-    // 不销毁 WatchCtx：ZooKeeper 可能仍持有传入的裸指针，直到会话关闭。
+    // 不销毁 WatchCtx：ZooKeeper 可能仍持有传入的裸指针，直到会话关闭
     std::lock_guard<std::mutex> lock(watchMu_);
     if (path)
     {
@@ -183,7 +183,7 @@ zhandle_t *ZkClient::takeHandle()
 
 bool ZkClient::Start(double timeoutSec)
 {
-    // 句柄创建与连接等待分开；并发 Start 调用可复用同一会话。
+    // 句柄创建与连接等待分开；并发 Start 调用可复用同一会话
     if (!hasHandle())
     {
         if (!startInternal(timeoutSec, true))
@@ -201,7 +201,7 @@ bool ZkClient::Start(double timeoutSec)
 
 bool ZkClient::startInternal(double timeoutSec, bool announce)
 {
-    // apiMu_ 保护句柄创建；stateCv_ 等待 sessionWatcher 报告连接或关闭。
+    // apiMu_ 保护句柄创建；stateCv_ 等待 sessionWatcher 报告连接或关闭
     std::string host = MprpcApplication::GetInstance().GetConfig().Load("zookeeperip");
     std::string port = MprpcApplication::GetInstance().GetConfig().Load("zookeeperport");
     if (host.empty() || port.empty())
@@ -250,7 +250,7 @@ bool ZkClient::startInternal(double timeoutSec, bool announce)
 
 void ZkClient::reinitAsync()
 {
-    // 合并重复的过期通知，并将 close/init/等待操作移出 ZooKeeper 回调线程。
+    // 合并重复的过期通知，并将 close/init/等待操作移出 ZooKeeper 回调线程
     bool expected = false;
     if (!reinitPending_.compare_exchange_strong(expected, true))
     {
@@ -290,7 +290,7 @@ bool ZkClient::Create(const char *path, const char *data, int datalen, int state
         return false;
     }
 
-    // exists 与 create 在同一把句柄锁下执行；并发创建由 ZNODEEXISTS 视为成功。
+    // exists 与 create 在同一把句柄锁下执行；并发创建由 ZNODEEXISTS 视为成功
     for (int attempt = 0; attempt < kCreateRetries; ++attempt)
     {
         int exists = ZINVALIDSTATE;
@@ -371,7 +371,7 @@ bool ZkClient::GetChildrenData(const char *path,
         return false;
     }
 
-    // WatchCtx 地址在句柄关闭前保持稳定；同一路径更新回调但复用上下文。
+    // WatchCtx 地址在句柄关闭前保持稳定；同一路径更新回调但复用上下文
     children.clear();
 
     std::shared_ptr<WatchCtx> wc;
@@ -427,7 +427,7 @@ bool ZkClient::GetChildrenData(const char *path,
 
 void ZkClient::Close()
 {
-    // 先阻止新任务并 join 工作线程，再关闭句柄；这样在途 watcher 不会访问已释放上下文。
+    // 先阻止新任务并 join 工作线程，再关闭句柄；这样在途 watcher 不会访问已释放上下文
     const bool alreadyClosed = closed_.exchange(true, std::memory_order_acq_rel);
     {
         std::lock_guard<std::mutex> lock(stateMu_);
@@ -459,7 +459,7 @@ void ZkClient::Close()
 
 bool ZkClient::queueTask(std::function<void()> task)
 {
-    // 与 Close 共用 taskMu_，保证关闭后不会再有新任务入队。
+    // 与 Close 共用 taskMu_，保证关闭后不会再有新任务入队
     std::lock_guard<std::mutex> lock(taskMu_);
     if (stoppingTasks_ || closed_.load(std::memory_order_acquire))
     {
@@ -472,7 +472,7 @@ bool ZkClient::queueTask(std::function<void()> task)
 
 void ZkClient::workerLoop()
 {
-    // 用户回调异常不能让唯一的后台工作线程意外退出。
+    // 用户回调异常不能让唯一的后台工作线程意外退出
     for (;;)
     {
         std::function<void()> task;
@@ -504,7 +504,7 @@ void ZkClient::workerLoop()
 
 void ZkClient::refreshWatches()
 {
-    // 先快照有效订阅，避免持有 watchMu_ 调用 ZooKeeper API 或用户代码。
+    // 先快照有效订阅，避免持有 watchMu_ 调用 ZooKeeper API 或用户代码
     std::vector<std::pair<std::string, std::function<void()>>> watches;
     {
         std::lock_guard<std::mutex> lock(watchMu_);
