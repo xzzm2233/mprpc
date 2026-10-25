@@ -115,13 +115,10 @@ void RpcProvider::Run()
 
     m_ioThreads = LoadBoundedInt(cfg, "rpcserveriothreads", 4, 1, 256);
     m_maxInflight = LoadBoundedInt(cfg, "rpcmaxinflight", 1024, 1, INT_MAX);
-    m_highWater = static_cast<size_t>(
-        LoadBoundedInt(cfg, "rpchighwater", 8 * 1024 * 1024, 1, INT_MAX));
+    m_highWater = static_cast<size_t>(LoadBoundedInt(cfg, "rpchighwater", 8 * 1024 * 1024, 1, INT_MAX));
     m_compress = cfg.LoadBool("rpccompress", true);
-    m_compressLevel = LoadBoundedInt(cfg, "rpccompresslevel", 3,
-                                     ZSTD_minCLevel(), ZSTD_maxCLevel());
-    m_compressMin = static_cast<size_t>(
-        LoadBoundedInt(cfg, "rpccompressmin", 8 * 1024, 0, INT_MAX));
+    m_compressLevel = LoadBoundedInt(cfg, "rpccompresslevel", 3, ZSTD_minCLevel(), ZSTD_maxCLevel());
+    m_compressMin = static_cast<size_t>(LoadBoundedInt(cfg, "rpccompressmin", 8 * 1024, 0, INT_MAX));
     m_metricsInterval = LoadBoundedInt(cfg, "rpcmetricsinterval", 10, 0, INT_MAX);
 
     const unsigned hw = std::thread::hardware_concurrency();
@@ -417,6 +414,7 @@ void RpcProvider::ProcessRequest(const TcpConnectionPtr &conn,
 
     std::unique_ptr<google::protobuf::Message> request(
         service->GetRequestPrototype(method).New());
+        
     if (!request->ParseFromArray(requestArgs->data(),
                                  static_cast<int>(requestArgs->size())))
     {
@@ -473,8 +471,7 @@ void RpcProvider::ProcessRequest(const TcpConnectionPtr &conn,
                                               {
                                                   ctx->controller->SetFailed("service handler threw");
                                                   done->Run();
-                                              }
-                                          });
+                                              } });
 
     if (!queued)
     {
