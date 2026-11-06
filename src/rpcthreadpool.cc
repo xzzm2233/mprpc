@@ -24,7 +24,7 @@ void RpcThreadPool::start()
     }
     stopping_ = false;
     workers_.reserve(threadNum_);
-    for (size_t i = 0; i < threadNum_; ++i)
+    for (size_t threadIndex = 0; threadIndex < threadNum_; ++threadIndex)
     {
         workers_.emplace_back([this]()
                               { workerLoop(); });
@@ -43,11 +43,11 @@ void RpcThreadPool::stop()
         stopping_ = true;
     }
     cv_.notify_all();
-    for (auto &t : workers_)
+    for (auto &worker : workers_)
     {
-        if (t.joinable())
+        if (worker.joinable())
         {
-            t.join();
+            worker.join();
         }
     }
     workers_.clear();

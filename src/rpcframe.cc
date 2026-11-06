@@ -134,12 +134,12 @@ bool CompressRpcFrameBody(const void *src, size_t srcLen, void *dst,
     {
         return false;
     }
-    const size_t n = ZSTD_compress(dst, dstCap, src, srcLen, level);
-    if (ZSTD_isError(n))
+    const size_t compressedSize = ZSTD_compress(dst, dstCap, src, srcLen, level);
+    if (ZSTD_isError(compressedSize))
     {
         return false;
     }
-    *outLen = n;
+    *outLen = compressedSize;
     return true;
 }
 
@@ -151,11 +151,11 @@ bool DecompressRpcFrameBody(const void *src, size_t srcLen, void *dst,
     {
         return false;
     }
-    const size_t n = ZSTD_decompress(dst, dstCap, src, srcLen);
-    if (ZSTD_isError(n))
+    const size_t decompressedSize = ZSTD_decompress(dst, dstCap, src, srcLen);
+    if (ZSTD_isError(decompressedSize))
     {
         return false;
     }
-    *outLen = n;
+    *outLen = decompressedSize;
     return true;
 }

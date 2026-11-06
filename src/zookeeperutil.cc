@@ -37,10 +37,10 @@ void ZkClient::sessionWatcher(zhandle_t *, int type, int state, const char *, vo
     {
         return;
     }
-    ZkClient *self = static_cast<ZkClient *>(watcherCtx);
-    if (self)
+    ZkClient *client = static_cast<ZkClient *>(watcherCtx);
+    if (client)
     {
-        self->handleSessionEvent(state);
+        client->handleSessionEvent(state);
     }
 }
 
@@ -54,25 +54,25 @@ void ZkClient::childrenWatcher(zhandle_t *, int type, int state, const char *pat
         // 会话事件由 sessionWatcher 处理（重连后统一重新拉取并续期 watch）
         return;
     }
-    WatchCtx *wc = static_cast<WatchCtx *>(watcherCtx);
-    if (!wc || !wc->self)
+    WatchCtx *watchContext = static_cast<WatchCtx *>(watcherCtx);
+    if (!watchContext || !watchContext->client)
     {
         return;
     }
-    ZkClient *self = wc->self;
+    ZkClient *client = watchContext->client;
 
     // 先复制回调并释放锁，再排队，避免在 ZooKeeper 原生 IO 线程调用同步 API
-    std::function<void()> fn;
+    std::function<void()> callback;
     {
-        std::lock_guard<std::mutex> lock(self->watchMu_);
-        auto it = self->watches_.find(wc->path);
-        if (it == self->watches_.end() || !it->second->fn)
+        std::lock_guard<std::mutex> lock(client->watchMu_);
+        auto watchEntry = client->watches_.find(watchContext->path);
+        if (watchEntry == client->watches_.end() || !watchEntry->second->callback)
         {
             return;
         }
-        fn = it->second->fn;
+        callback = watchEntry->second->callback;
     }
-    self->queueTask(std::move(fn));
+    client->queueTask(std::move(callback));
 }
 
 void ZkClient::handleSessionEvent(int state)
@@ -122,28 +122,29 @@ void ZkClient::invokeSessionCallbacks(bool isReconnect)
         std::lock_guard<std::mutex> lock(cbMu_);
         copy = sessionCallbacks_;
     }
-    for (auto &p : copy)
+    for (auto &callbackEntry : copy)
     {
-        if (p.second)
-            p.second(isReconnect);
+        if (callbackEntry.second)
+            callbackEntry.second(isReconnect);
     }
 }
 
-void ZkClient::addSessionCallback(void *owner, SessionCallback cb)
+void ZkClient::addSessionCallback(void *owner, SessionCallback callback)
 {
     std::lock_guard<std::mutex> lock(cbMu_);
-    sessionCallbacks_.push_back(std::make_pair(owner, std::move(cb)));
+    sessionCallbacks_.push_back(std::make_pair(owner, std::move(callback)));
 }
 
 void ZkClient::removeSessionCallbacks(void *owner)
 {
     std::lock_guard<std::mutex> lock(cbMu_);
-    for (auto it = sessionCallbacks_.begin(); it != sessionCallbacks_.end();)
+    for (auto callbackEntry = sessionCallbacks_.begin();
+         callbackEntry != sessionCallbacks_.end();)
     {
-        if (it->first == owner)
-            it = sessionCallbacks_.erase(it);
+        if (callbackEntry->first == owner)
+            callbackEntry = sessionCallbacks_.erase(callbackEntry);
         else
-            ++it;
+            ++callbackEntry;
     }
 }
 
@@ -153,10 +154,10 @@ void ZkClient::removeWatch(const char *path)
     std::lock_guard<std::mutex> lock(watchMu_);
     if (path)
     {
-        auto it = watches_.find(path);
-        if (it != watches_.end())
+        auto watchEntry = watches_.find(path);
+        if (watchEntry != watches_.end())
         {
-            it->second->fn = nullptr;
+            watchEntry->second->callback = nullptr;
         }
     }
 }
@@ -176,9 +177,9 @@ bool ZkClient::hasHandle() const
 zhandle_t *ZkClient::takeHandle()
 {
     std::lock_guard<std::mutex> lock(apiMu_);
-    zhandle_t *zh = m_zhandle;
+    zhandle_t *zookeeperHandle = m_zhandle;
     m_zhandle = nullptr;
-    return zh;
+    return zookeeperHandle;
 }
 
 bool ZkClient::Start(double timeoutSec)
@@ -293,36 +294,38 @@ bool ZkClient::Create(const char *path, const char *data, int datalen, int state
     // exists 与 create 在同一把句柄锁下执行；并发创建由 ZNODEEXISTS 视为成功
     for (int attempt = 0; attempt < kCreateRetries; ++attempt)
     {
-        int exists = ZINVALIDSTATE;
-        int rc = ZINVALIDSTATE;
+        int existsResult = ZINVALIDSTATE;
+        int createResult = ZINVALIDSTATE;
         {
             std::lock_guard<std::mutex> lock(apiMu_);
             if (m_zhandle)
             {
-                exists = zoo_exists(m_zhandle, path, 0, nullptr);
-                if (exists == ZNONODE)
+                existsResult = zoo_exists(m_zhandle, path, 0, nullptr);
+                if (existsResult == ZNONODE)
                 {
-                    char path_buffer[512] = {0};
-                    rc = zoo_create(m_zhandle, path, data, datalen, &ZOO_OPEN_ACL_UNSAFE,
-                                    state, path_buffer, sizeof(path_buffer));
+                    char pathBuffer[512] = {0};
+                    createResult = zoo_create(m_zhandle, path, data, datalen,
+                                              &ZOO_OPEN_ACL_UNSAFE, state,
+                                              pathBuffer, sizeof(pathBuffer));
                 }
             }
         }
-        if (exists == ZOK)
+        if (existsResult == ZOK)
         {
             return true;
         }
-        if (exists == ZNONODE && (rc == ZOK || rc == ZNODEEXISTS))
+        if (existsResult == ZNONODE &&
+            (createResult == ZOK || createResult == ZNODEEXISTS))
         {
             return true;
         }
-        if (exists != ZNONODE)
+        if (existsResult != ZNONODE)
         {
-            LOG_ERROR("zoo_exists(%s) rc=%d", path, exists);
+            LOG_ERROR("zoo_exists(%s) rc=%d", path, existsResult);
         }
         else
         {
-            LOG_ERROR("zoo_create(%s) rc=%d", path, rc);
+            LOG_ERROR("zoo_create(%s) rc=%d", path, createResult);
         }
         usleep(50 * 1000 * (attempt + 1));
     }
@@ -344,10 +347,10 @@ std::string ZkClient::GetData(const char *path)
     // 数据为 "ip:port"，8KB 足够；按 zoo_get 约定 buffer_len 入参为容量、出参为实际长度
     char buffer[8 * 1024] = {0};
     int bufferlen = sizeof(buffer);
-    const int rc = zoo_get(m_zhandle, path, 0, buffer, &bufferlen, nullptr);
-    if (rc != ZOK)
+    const int resultCode = zoo_get(m_zhandle, path, 0, buffer, &bufferlen, nullptr);
+    if (resultCode != ZOK)
     {
-        LOG_ERROR("zoo_get(%s) rc=%d", path, rc);
+        LOG_ERROR("zoo_get(%s) rc=%d", path, resultCode);
         return "";
     }
     if (bufferlen < 0)
@@ -374,54 +377,57 @@ bool ZkClient::GetChildrenData(const char *path,
     // WatchCtx 地址在句柄关闭前保持稳定；同一路径更新回调但复用上下文
     children.clear();
 
-    std::shared_ptr<WatchCtx> wc;
+    std::shared_ptr<WatchCtx> watchContext;
     {
         std::lock_guard<std::mutex> lock(watchMu_);
-        auto &slot = watches_[path];
-        if (!slot)
+        auto &watchEntry = watches_[path];
+        if (!watchEntry)
         {
-            slot = std::make_shared<WatchCtx>();
-            slot->self = this;
-            slot->path = path;
+            watchEntry = std::make_shared<WatchCtx>();
+            watchEntry->client = this;
+            watchEntry->path = path;
         }
-        wc = slot;
-        wc->fn = std::move(onChange);
+        watchContext = watchEntry;
+        watchContext->callback = std::move(onChange);
     }
 
-    struct String_vector vec;
-    vec.count = 0;
-    vec.data = nullptr;
-    int rc = ZINVALIDSTATE;
-    int existsRc = ZINVALIDSTATE;
+    struct String_vector childrenVector;
+    childrenVector.count = 0;
+    childrenVector.data = nullptr;
+    int resultCode = ZINVALIDSTATE;
+    int existsResultCode = ZINVALIDSTATE;
     {
         std::lock_guard<std::mutex> lock(apiMu_);
         if (m_zhandle)
         {
-            rc = zoo_wget_children(m_zhandle, path, childrenWatcher, wc.get(), &vec);
-            if (rc == ZNONODE)
+            resultCode = zoo_wget_children(m_zhandle, path, childrenWatcher,
+                                           watchContext.get(), &childrenVector);
+            if (resultCode == ZNONODE)
             {
-                existsRc = zoo_wexists(m_zhandle, path, childrenWatcher, wc.get(), nullptr);
+                existsResultCode = zoo_wexists(m_zhandle, path, childrenWatcher,
+                                               watchContext.get(), nullptr);
             }
         }
     }
-    if (rc == ZNONODE)
+    if (resultCode == ZNONODE)
     {
         // 节点还不存在：挂一个 exists watch，等它出现时回调（回调里会重新拉取）
-        LOG_INFO("znode %s not exist yet (exists rc=%d), waiting", path, existsRc);
+        LOG_INFO("znode %s not exist yet (exists rc=%d), waiting", path,
+                 existsResultCode);
         return false;
     }
-    if (rc != ZOK)
+    if (resultCode != ZOK)
     {
-        LOG_ERROR("zoo_wget_children(%s) rc=%d", path, rc);
+        LOG_ERROR("zoo_wget_children(%s) rc=%d", path, resultCode);
         return false;
     }
 
-    children.reserve(static_cast<size_t>(vec.count));
-    for (int i = 0; i < vec.count; ++i)
+    children.reserve(static_cast<size_t>(childrenVector.count));
+    for (int childIndex = 0; childIndex < childrenVector.count; ++childIndex)
     {
-        children.emplace_back(vec.data[i]);
+        children.emplace_back(childrenVector.data[childIndex]);
     }
-    deallocate_String_vector(&vec);
+    deallocate_String_vector(&childrenVector);
     return true;
 }
 
@@ -448,9 +454,9 @@ void ZkClient::Close()
         }
     }
 
-    if (zhandle_t *zh = takeHandle())
+    if (zhandle_t *zookeeperHandle = takeHandle())
     {
-        zookeeper_close(zh);
+        zookeeper_close(zookeeperHandle);
     }
 
     std::lock_guard<std::mutex> lock(watchMu_);
@@ -491,9 +497,9 @@ void ZkClient::workerLoop()
         {
             task();
         }
-        catch (const std::exception &e)
+        catch (const std::exception &taskException)
         {
-            LOG_ERROR("ZooKeeper background task failed: %s", e.what());
+            LOG_ERROR("ZooKeeper background task failed: %s", taskException.what());
         }
         catch (...)
         {
@@ -510,16 +516,17 @@ void ZkClient::refreshWatches()
         std::lock_guard<std::mutex> lock(watchMu_);
         for (const auto &entry : watches_)
         {
-            if (entry.second->fn)
+            if (entry.second->callback)
             {
-                watches.emplace_back(entry.first, entry.second->fn);
+                watches.emplace_back(entry.first, entry.second->callback);
             }
         }
     }
 
-    for (const auto &watch : watches)
+    for (const auto &watchSubscription : watches)
     {
         std::vector<std::string> children;
-        GetChildrenData(watch.first.c_str(), children, watch.second);
+        GetChildrenData(watchSubscription.first.c_str(), children,
+                        watchSubscription.second);
     }
 }

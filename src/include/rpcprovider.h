@@ -77,7 +77,7 @@ private:
                         int64_t startNs);
 
     // 业务 done 回调：记录结果、发送响应并回收调用上下文
-    void OnResponse(RpcContext *ctx);
+    void OnResponse(RpcContext *context);
 
     // 响应统一使用 protobuf 帧头；大响应可按配置尝试压缩
     void SendResponse(const TcpConnectionPtr &conn, uint64_t reqId, uint64_t traceId,

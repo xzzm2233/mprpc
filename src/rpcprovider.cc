@@ -77,9 +77,10 @@ void RpcProvider::NotifyService(google::protobuf::Service *service)
     info.service = service;
 
     LOG_INFO("service_name:%s:", info.name.c_str());
-    for (int i = 0; i < serviceDesc->method_count(); ++i)
+    for (int methodIndex = 0; methodIndex < serviceDesc->method_count(); ++methodIndex)
     {
-        const google::protobuf::MethodDescriptor *methodDesc = serviceDesc->method(i);
+        const google::protobuf::MethodDescriptor *methodDesc =
+            serviceDesc->method(methodIndex);
         info.methods.emplace(methodDesc->name(), methodDesc);
         LOG_INFO("method_name:%s:", methodDesc->name().c_str());
     }
@@ -93,10 +94,10 @@ void RpcProvider::NotifyService(google::protobuf::Service *service)
 void RpcProvider::Run()
 {
     // 先加载资源限制和线程配置，再启动依赖服务的网络监听
-    auto &cfg = MprpcApplication::GetInstance().GetConfig();
+    auto &config = MprpcApplication::GetInstance().GetConfig();
 
-    const std::string ip = cfg.Load("rpcserverip");
-    const std::string portStr = cfg.Load("rpcserverport");
+    const std::string ip = config.Load("rpcserverip");
+    const std::string portStr = config.Load("rpcserverport");
     if (ip.empty() || portStr.empty())
     {
         LOG_ERROR("rpcserverip/rpcserverport not configured");
@@ -113,20 +114,21 @@ void RpcProvider::Run()
     }
     const uint16_t port = static_cast<uint16_t>(parsedPort);
 
-    m_ioThreads = LoadBoundedInt(cfg, "rpcserveriothreads", 4, 1, 256);
-    m_maxInflight = LoadBoundedInt(cfg, "rpcmaxinflight", 1024, 1, INT_MAX);
-    m_highWater = static_cast<size_t>(LoadBoundedInt(cfg, "rpchighwater", 8 * 1024 * 1024, 1, INT_MAX));
-    m_compress = cfg.LoadBool("rpccompress", true);
-    m_compressLevel = LoadBoundedInt(cfg, "rpccompresslevel", 3, ZSTD_minCLevel(), ZSTD_maxCLevel());
-    m_compressMin = static_cast<size_t>(LoadBoundedInt(cfg, "rpccompressmin", 8 * 1024, 0, INT_MAX));
-    m_metricsInterval = LoadBoundedInt(cfg, "rpcmetricsinterval", 10, 0, INT_MAX);
+    m_ioThreads = LoadBoundedInt(config, "rpcserveriothreads", 4, 1, 256);
+    m_maxInflight = LoadBoundedInt(config, "rpcmaxinflight", 1024, 1, INT_MAX);
+    m_highWater = static_cast<size_t>(LoadBoundedInt(config, "rpchighwater", 8 * 1024 * 1024, 1, INT_MAX));
+    m_compress = config.LoadBool("rpccompress", true);
+    m_compressLevel = LoadBoundedInt(config, "rpccompresslevel", 3, ZSTD_minCLevel(), ZSTD_maxCLevel());
+    m_compressMin = static_cast<size_t>(LoadBoundedInt(config, "rpccompressmin", 8 * 1024, 0, INT_MAX));
+    m_metricsInterval = LoadBoundedInt(config, "rpcmetricsinterval", 10, 0, INT_MAX);
 
-    const unsigned hw = std::thread::hardware_concurrency();
-    const int defaultWorkers = hw && hw <= static_cast<unsigned>(INT_MAX / 2)
-                                   ? static_cast<int>(hw * 2)
-                                   : 8;
-    const int workers = LoadBoundedInt(cfg, "rpcworkers", defaultWorkers, 1, 4096);
-    const int workerQueue = LoadBoundedInt(cfg, "rpcworkerqueue", 4096, 1, INT_MAX);
+    const unsigned hardwareThreadCount = std::thread::hardware_concurrency();
+    const int defaultWorkers =
+        hardwareThreadCount && hardwareThreadCount <= static_cast<unsigned>(INT_MAX / 2)
+            ? static_cast<int>(hardwareThreadCount * 2)
+            : 8;
+    const int workers = LoadBoundedInt(config, "rpcworkers", defaultWorkers, 1, 4096);
+    const int workerQueue = LoadBoundedInt(config, "rpcworkerqueue", 4096, 1, INT_MAX);
 
     m_workers.reset(new RpcThreadPool(static_cast<size_t>(workers),
                                       static_cast<size_t>(workerQueue)));
@@ -144,21 +146,22 @@ void RpcProvider::Run()
     server.setThreadNum(m_ioThreads);
 
     // ---- ZooKeeper 注册（可关闭；关闭后仅直连地址可用）----
-    const bool useZk = cfg.LoadBool("zooenabled", !cfg.Load("zookeeperip", "").empty());
+    const bool useZk = config.LoadBool("zooenabled", !config.Load("zookeeperip", "").empty());
     if (useZk)
     {
         // 注册内容在启动时一次性算好并按值捕获：会话回调由 ZK 工作线程执行
         // 不再依赖 this，因此 provider 销毁后回调也不会踩野指针
         auto nodes = std::make_shared<std::vector<RpcProviderZkNode>>();
-        const std::string ep = ip + ":" + portStr;
-        for (auto &sp : m_serviceMap)
+        const std::string endpoint = ip + ":" + portStr;
+        for (auto &serviceEntry : m_serviceMap)
         {
-            nodes->push_back({"/" + sp.first, "", false});
-            for (auto &mp : sp.second.methods)
+            nodes->push_back({"/" + serviceEntry.first, "", false});
+            for (auto &methodEntry : serviceEntry.second.methods)
             {
-                nodes->push_back({"/" + sp.first + "/" + mp.first, "", false});
+                nodes->push_back({"/" + serviceEntry.first + "/" + methodEntry.first, "", false});
                 // 每个实例注册独立的临时子节点：多实例可同时注册、下线自动消失
-                nodes->push_back({"/" + sp.first + "/" + mp.first + "/" + ep, ep, true});
+                nodes->push_back({"/" + serviceEntry.first + "/" + methodEntry.first + "/" + endpoint,
+                                  endpoint, true});
             }
         }
 
@@ -169,15 +172,15 @@ void RpcProvider::Run()
             {
                 LOG_INFO("zookeeper session re-established, re-registering ephemeral nodes");
             }
-            for (const auto &n : *nodes)
+            for (const auto &node : *nodes)
             {
-                ZkClient::global().Create(n.path.c_str(),
-                                          n.data.empty() ? nullptr : n.data.c_str(),
-                                          static_cast<int>(n.data.size()),
-                                          n.ephemeral ? ZOO_EPHEMERAL : 0);
+                ZkClient::global().Create(node.path.c_str(),
+                                          node.data.empty() ? nullptr : node.data.c_str(),
+                                          static_cast<int>(node.data.size()),
+                                          node.ephemeral ? ZOO_EPHEMERAL : 0);
             } });
 
-        double zkTimeout = cfg.LoadDouble("rpczkconnecttimeout", 10.0);
+        double zkTimeout = config.LoadDouble("rpczkconnecttimeout", 10.0);
         if (!std::isfinite(zkTimeout) || zkTimeout <= 0.0)
         {
             LOG_ERROR("invalid rpczkconnecttimeout=%.3f, using 10 seconds", zkTimeout);
@@ -225,21 +228,21 @@ void RpcProvider::OnConnection(const TcpConnectionPtr &conn)
     // 新连接初始化解析状态；关闭时清除线程本地状态
     if (conn->connected())
     {
-        RpcProviderConnState &st = RpcProviderConnStates()[conn.get()];
-        if (!st.stats)
+        RpcProviderConnState &connectionState = RpcProviderConnStates()[conn.get()];
+        if (!connectionState.stats)
         {
-            st.stats = std::make_shared<RpcConnStats>();
+            connectionState.stats = std::make_shared<RpcConnStats>();
         }
-        st.frame.reset();
+        connectionState.frame.reset();
 
         // 背压：对端不消费时限制积压，避免 outputBuffer 无限增长
         conn->setHighWaterMarkCallback(
-            [this](const TcpConnectionPtr &c, size_t mark)
-            { OnHighWater(c, mark); },
+            [this](const TcpConnectionPtr &connection, size_t mark)
+            { OnHighWater(connection, mark); },
             m_highWater);
         conn->setWriteCompleteCallback(
-            [this](const TcpConnectionPtr &c)
-            { OnWriteComplete(c); });
+            [this](const TcpConnectionPtr &connection)
+            { OnWriteComplete(connection); });
 
         LOG_INFO("new connection: %s", conn->peerAddress().toIpPort().c_str());
     }
@@ -253,15 +256,16 @@ void RpcProvider::OnConnection(const TcpConnectionPtr &conn)
 void RpcProvider::OnHighWater(const TcpConnectionPtr &conn, size_t mark)
 {
     // 输出缓存持续增长时对该连接限流，反复触发则关闭连接
-    auto it = RpcProviderConnStates().find(conn.get());
-    if (it == RpcProviderConnStates().end() || !it->second.stats)
+    auto connectionStateIterator = RpcProviderConnStates().find(conn.get());
+    if (connectionStateIterator == RpcProviderConnStates().end() ||
+        !connectionStateIterator->second.stats)
     {
         return;
     }
-    RpcConnStats &st = *it->second.stats;
-    ++st.highWaterHits;
+    RpcConnStats &connectionStats = *connectionStateIterator->second.stats;
+    ++connectionStats.highWaterHits;
 
-    if (st.highWaterHits >= 2)
+    if (connectionStats.highWaterHits >= 2)
     {
         // 缓冲已越过水位又再次越过：对端完全不消费，断开保护自己
         LOG_ERROR("peer not draining output buffer (mark=%zu), force close %s",
@@ -271,20 +275,21 @@ void RpcProvider::OnHighWater(const TcpConnectionPtr &conn, size_t mark)
         return;
     }
 
-    st.overloaded.store(true, std::memory_order_relaxed);
+    connectionStats.overloaded.store(true, std::memory_order_relaxed);
     LOG_INFO("output buffer hit high water mark %zu, shedding new requests on %s",
              mark, conn->peerAddress().toIpPort().c_str());
 }
 
 void RpcProvider::OnWriteComplete(const TcpConnectionPtr &conn)
 {
-    auto it = RpcProviderConnStates().find(conn.get());
-    if (it == RpcProviderConnStates().end() || !it->second.stats)
+    auto connectionStateIterator = RpcProviderConnStates().find(conn.get());
+    if (connectionStateIterator == RpcProviderConnStates().end() ||
+        !connectionStateIterator->second.stats)
     {
         return;
     }
-    it->second.stats->highWaterHits = 0;
-    it->second.stats->overloaded.store(false, std::memory_order_relaxed);
+    connectionStateIterator->second.stats->highWaterHits = 0;
+    connectionStateIterator->second.stats->overloaded.store(false, std::memory_order_relaxed);
 }
 
 void RpcProvider::OnMessage(const TcpConnectionPtr &conn,
@@ -294,9 +299,9 @@ void RpcProvider::OnMessage(const TcpConnectionPtr &conn,
     // 一次读事件中尽可能消费所有完整帧，尾部不完整数据留待下次继续解析
     (void)time;
 
-    RpcProviderConnState &st = RpcProviderConnStates()[conn.get()];
-    if (!st.stats)
-        st.stats = std::make_shared<RpcConnStats>();
+    RpcProviderConnState &connectionState = RpcProviderConnStates()[conn.get()];
+    if (!connectionState.stats)
+        connectionState.stats = std::make_shared<RpcConnStats>();
 
     for (;;)
     {
@@ -304,31 +309,34 @@ void RpcProvider::OnMessage(const TcpConnectionPtr &conn,
         const size_t readable = buffer->readableBytes();
 
         // 帧头只解析一次：进度保存在 st.frame 里，半包不会反复 parse
-        const RpcFrameFeedResult r = FeedRpcFrame(base, readable, &st.frame);
-        if (r == RpcFrameFeedResult::kNeedMore)
+        const RpcFrameFeedResult feedResult =
+            FeedRpcFrame(base, readable, &connectionState.frame);
+        if (feedResult == RpcFrameFeedResult::kNeedMore)
         {
             return;
         }
-        if (r == RpcFrameFeedResult::kError)
+        if (feedResult == RpcFrameFeedResult::kError)
         {
             LOG_ERROR("malformed frame from %s (headerSize=%u), closing",
-                      conn->peerAddress().toIpPort().c_str(), st.frame.headerSize);
+                      conn->peerAddress().toIpPort().c_str(),
+                      connectionState.frame.headerSize);
             RpcMetrics::instance().record("server", "__badframe__", 0, false, false, false);
             buffer->retrieveAll();
-            st.frame.reset();
+            connectionState.frame.reset();
             conn->shutdown(); // 流已无法定界，只能断开
             return;
         }
 
-        const size_t total = st.frame.totalSize();
+        const size_t totalFrameSize = connectionState.frame.totalSize();
         // body 需要拷贝：交给工作线程后，inputBuffer 会被后续读写改写/搬移
-        std::string args(base + 4 + st.frame.headerSize,
-                         st.frame.header.args_size());
-        const int64_t startNs = st.frame.startNs;
-        buffer->retrieve(total);
+        std::string requestBody(base + 4 + connectionState.frame.headerSize,
+                                connectionState.frame.header.args_size());
+        const int64_t frameStartNs = connectionState.frame.startNs;
+        buffer->retrieve(totalFrameSize);
 
-        ProcessRequest(conn, st.stats, st.frame, std::move(args), startNs);
-        st.frame.reset();
+        ProcessRequest(conn, connectionState.stats, connectionState.frame,
+                       std::move(requestBody), frameStartNs);
+        connectionState.frame.reset();
     }
 }
 
@@ -371,16 +379,16 @@ void RpcProvider::ProcessRequest(const TcpConnectionPtr &conn,
     }
 
     // ---- 服务 / 方法查找 ----
-    auto sit = m_serviceMap.find(header.service_name());
-    if (sit == m_serviceMap.end())
+    auto serviceEntry = m_serviceMap.find(header.service_name());
+    if (serviceEntry == m_serviceMap.end())
     {
         RpcMetrics::instance().record("server", methodKey, now - startNs, false, false, false);
         SendError(conn, reqId, traceId, kRpcFrameNotFound,
                   header.service_name() + " not exist");
         return;
     }
-    auto mit = sit->second.methods.find(header.method_name());
-    if (mit == sit->second.methods.end())
+    auto methodEntry = serviceEntry->second.methods.find(header.method_name());
+    if (methodEntry == serviceEntry->second.methods.end())
     {
         RpcMetrics::instance().record("server", methodKey, now - startNs, false, false, false);
         SendError(conn, reqId, traceId, kRpcFrameNotFound,
@@ -388,8 +396,8 @@ void RpcProvider::ProcessRequest(const TcpConnectionPtr &conn,
         return;
     }
 
-    google::protobuf::Service *service = sit->second.service;
-    const google::protobuf::MethodDescriptor *method = mit->second;
+    google::protobuf::Service *service = serviceEntry->second.service;
+    const google::protobuf::MethodDescriptor *method = methodEntry->second;
 
     // ---- 反序列化 ----
     std::string decompressedArgs;
@@ -435,48 +443,49 @@ void RpcProvider::ProcessRequest(const TcpConnectionPtr &conn,
         controller->SetDeadline(static_cast<uint32_t>(remainMs > 0 ? remainMs : 1));
     }
 
-    auto *ctx = new RpcContext();
-    ctx->conn = conn;
-    ctx->reqId = reqId;
-    ctx->traceId = traceId;
-    ctx->stats = stats;
-    ctx->methodKey = methodKey;
-    ctx->startNs = startNs;
-    ctx->deadlineNs = deadlineNs;
-    ctx->request = std::move(request);
-    ctx->response = std::move(response);
-    ctx->controller.reset(controller);
+    auto *context = new RpcContext();
+    context->conn = conn;
+    context->reqId = reqId;
+    context->traceId = traceId;
+    context->stats = stats;
+    context->methodKey = methodKey;
+    context->startNs = startNs;
+    context->deadlineNs = deadlineNs;
+    context->request = std::move(request);
+    context->response = std::move(response);
+    context->controller.reset(controller);
 
     // ---- 在途计数 + 投递业务线程池 ----
     stats->inflight.fetch_add(1, std::memory_order_relaxed);
     RpcMetrics::instance().inflightUp("server", methodKey);
 
     google::protobuf::Closure *done =
-        google::protobuf::NewCallback(this, &RpcProvider::OnResponse, ctx);
+        google::protobuf::NewCallback(this, &RpcProvider::OnResponse, context);
 
-    const bool queued = m_workers->submit([service, method, ctx, done]()
+    const bool queued = m_workers->submit([service, method, context, done]()
                                           {
                                               try
                                               {
-                                                  service->CallMethod(method, ctx->controller.get(),
-                                                                      ctx->request.get(), ctx->response.get(), done);
+                                                  service->CallMethod(method, context->controller.get(),
+                                                                      context->request.get(), context->response.get(), done);
                                               }
-                                              catch (const std::exception &e)
+                                              catch (const std::exception &handlerException)
                                               {
-                                                  ctx->controller->SetFailed(
-                                                      std::string("service handler threw: ") + e.what());
+                                                  context->controller->SetFailed(
+                                                      std::string("service handler threw: ") +
+                                                      handlerException.what());
                                                   done->Run();
                                               }
                                               catch (...)
                                               {
-                                                  ctx->controller->SetFailed("service handler threw");
+                                                  context->controller->SetFailed("service handler threw");
                                                   done->Run();
                                               } });
 
     if (!queued)
     {
-        // 队列满：回滚准入并回 429；done 仍然要 Run 一次以回收 ctx
-        ctx->rejected = true;
+        // 队列满：回滚准入并回 429；done 仍然要 Run 一次以回收 context
+        context->rejected = true;
         RpcMetrics::instance().record("server", methodKey,
                                       RpcProviderSteadyNowNs() - startNs,
                                       false, false, true);
@@ -485,39 +494,39 @@ void RpcProvider::ProcessRequest(const TcpConnectionPtr &conn,
     }
 }
 
-void RpcProvider::OnResponse(RpcContext *ctx)
+void RpcProvider::OnResponse(RpcContext *context)
 {
     // 业务闭包可能在任意工作线程执行，TcpConnection::send 会负责跨线程投递
     const int64_t now = RpcProviderSteadyNowNs();
-    const int64_t latency = now - ctx->startNs;
+    const int64_t latency = now - context->startNs;
 
-    if (!ctx->rejected)
+    if (!context->rejected)
     {
-        if (ctx->deadlineNs > 0 && now > ctx->deadlineNs)
+        if (context->deadlineNs > 0 && now > context->deadlineNs)
         {
-            RpcMetrics::instance().record("server", ctx->methodKey, latency, false, true, false);
+            RpcMetrics::instance().record("server", context->methodKey, latency, false, true, false);
             char msg[128];
             snprintf(msg, sizeof(msg), "deadline exceeded (trace_id=%lu)",
-                     static_cast<unsigned long>(ctx->traceId));
-            SendError(ctx->conn, ctx->reqId, ctx->traceId,
+                     static_cast<unsigned long>(context->traceId));
+            SendError(context->conn, context->reqId, context->traceId,
                       kRpcFrameDeadlineExceeded, msg);
         }
-        else if (ctx->controller->Failed())
+        else if (context->controller->Failed())
         {
-            RpcMetrics::instance().record("server", ctx->methodKey, latency, false, false, false);
-            SendError(ctx->conn, ctx->reqId, ctx->traceId, kRpcFrameServerErr,
-                      ctx->controller->ErrorText());
+            RpcMetrics::instance().record("server", context->methodKey, latency, false, false, false);
+            SendError(context->conn, context->reqId, context->traceId, kRpcFrameServerErr,
+                      context->controller->ErrorText());
         }
         else
         {
-            RpcMetrics::instance().record("server", ctx->methodKey, latency, true, false, false);
-            SendResponse(ctx->conn, ctx->reqId, ctx->traceId, ctx->response.get());
+            RpcMetrics::instance().record("server", context->methodKey, latency, true, false, false);
+            SendResponse(context->conn, context->reqId, context->traceId, context->response.get());
         }
     }
 
-    ctx->stats->inflight.fetch_sub(1, std::memory_order_relaxed);
-    RpcMetrics::instance().inflightDown("server", ctx->methodKey);
-    delete ctx;
+    context->stats->inflight.fetch_sub(1, std::memory_order_relaxed);
+    RpcMetrics::instance().inflightDown("server", context->methodKey);
+    delete context;
 }
 
 void RpcProvider::SendResponse(const TcpConnectionPtr &conn, uint64_t reqId, uint64_t traceId,
@@ -531,9 +540,9 @@ void RpcProvider::SendResponse(const TcpConnectionPtr &conn, uint64_t reqId, uin
         return;
     }
 
-    RpcFrameHeader h;
-    h.set_req_id(reqId);
-    h.set_trace_id(traceId);
+    RpcFrameHeader responseHeader;
+    responseHeader.set_req_id(reqId);
+    responseHeader.set_trace_id(traceId);
 
     std::string packet;
 
@@ -544,19 +553,20 @@ void RpcProvider::SendResponse(const TcpConnectionPtr &conn, uint64_t reqId, uin
         if (response->SerializeToArray(&body[0], static_cast<int>(rawSize)))
         {
             const size_t bound = RpcFrameCompressBound(rawSize);
-            std::string comp(bound, '\0');
-            size_t n = 0;
-            if (CompressRpcFrameBody(body.data(), rawSize, &comp[0], bound,
-                                     m_compressLevel, &n) &&
-                n < rawSize)
+            std::string compressedBody(bound, '\0');
+            size_t compressedSize = 0;
+            if (CompressRpcFrameBody(body.data(), rawSize, &compressedBody[0], bound,
+                                     m_compressLevel, &compressedSize) &&
+                compressedSize < rawSize)
             {
-                h.set_flags(kRpcFrameFlagCompressed);
-                h.set_raw_size(static_cast<uint32_t>(rawSize));
-                h.set_args_size(static_cast<uint32_t>(n));
-                const size_t off = BeginEncodeRpcFrame(h, n, &packet);
-                if (off != kRpcFrameInvalidOffset)
+                responseHeader.set_flags(kRpcFrameFlagCompressed);
+                responseHeader.set_raw_size(static_cast<uint32_t>(rawSize));
+                responseHeader.set_args_size(static_cast<uint32_t>(compressedSize));
+                const size_t bodyOffset =
+                    BeginEncodeRpcFrame(responseHeader, compressedSize, &packet);
+                if (bodyOffset != kRpcFrameInvalidOffset)
                 {
-                    std::memcpy(&packet[off], comp.data(), n);
+                    std::memcpy(&packet[bodyOffset], compressedBody.data(), compressedSize);
                     conn->send(packet);
                     return;
                 }
@@ -565,16 +575,16 @@ void RpcProvider::SendResponse(const TcpConnectionPtr &conn, uint64_t reqId, uin
         // 压缩失败 → 走未压缩路径
     }
 
-    h.set_flags(0);
-    h.set_raw_size(static_cast<uint32_t>(rawSize));
-    h.set_args_size(static_cast<uint32_t>(rawSize));
-    const size_t off = BeginEncodeRpcFrame(h, rawSize, &packet);
-    if (off == kRpcFrameInvalidOffset)
+    responseHeader.set_flags(0);
+    responseHeader.set_raw_size(static_cast<uint32_t>(rawSize));
+    responseHeader.set_args_size(static_cast<uint32_t>(rawSize));
+    const size_t bodyOffset = BeginEncodeRpcFrame(responseHeader, rawSize, &packet);
+    if (bodyOffset == kRpcFrameInvalidOffset)
     {
         LOG_ERROR("encode response failed, req_id=%lu", static_cast<unsigned long>(reqId));
         return;
     }
-    if (!response->SerializeToArray(&packet[off], static_cast<int>(rawSize)))
+    if (!response->SerializeToArray(&packet[bodyOffset], static_cast<int>(rawSize)))
     {
         LOG_ERROR("serialize response failed, req_id=%lu", static_cast<unsigned long>(reqId));
         return;
@@ -586,16 +596,16 @@ void RpcProvider::SendError(const TcpConnectionPtr &conn, uint64_t reqId, uint64
                             int32_t errCode, const std::string &errMsg)
 {
     // 错误响应不携带 body，错误文本放在 protobuf 帧头中
-    RpcFrameHeader h;
-    h.set_req_id(reqId);
-    h.set_trace_id(traceId);
-    h.set_err_code(errCode);
-    h.set_err_msg(errMsg);
-    h.set_args_size(0);
+    RpcFrameHeader errorHeader;
+    errorHeader.set_req_id(reqId);
+    errorHeader.set_trace_id(traceId);
+    errorHeader.set_err_code(errCode);
+    errorHeader.set_err_msg(errMsg);
+    errorHeader.set_args_size(0);
 
     std::string packet;
-    const size_t off = BeginEncodeRpcFrame(h, 0, &packet);
-    if (off == kRpcFrameInvalidOffset)
+    const size_t bodyOffset = BeginEncodeRpcFrame(errorHeader, 0, &packet);
+    if (bodyOffset == kRpcFrameInvalidOffset)
     {
         return;
     }

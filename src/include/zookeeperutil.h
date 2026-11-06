@@ -31,7 +31,7 @@ public:
     bool connected() const;
 
     // 注册会话建立回调。已连接时也会异步收到当前会话通知
-    void addSessionCallback(void *owner, SessionCallback cb);
+    void addSessionCallback(void *owner, SessionCallback callback);
     // 删除指定 owner 的全部会话回调
     void removeSessionCallbacks(void *owner);
     // 停止指定路径的 watch 通知；保留 watcher 上下文以保证晚到回调安全
@@ -56,15 +56,17 @@ private:
     struct WatchCtx
     {
         // ZooKeeper 保存该上下文指针；直到句柄关闭前由 watches_ 保持其地址有效
-        ZkClient *self = nullptr;
+        ZkClient *client = nullptr;
         std::string path;
-        std::function<void()> fn;
+        std::function<void()> callback;
     };
 
-    static void sessionWatcher(zhandle_t *zh, int type, int state,
-                               const char *path, void *watcherCtx);
-    static void childrenWatcher(zhandle_t *zh, int type, int state,
-                                const char *path, void *watcherCtx);
+    static void sessionWatcher(zhandle_t *zookeeperHandle, int eventType,
+                               int connectionState, const char *path,
+                               void *watcherContext);
+    static void childrenWatcher(zhandle_t *zookeeperHandle, int eventType,
+                                int connectionState, const char *path,
+                                void *watcherContext);
 
     void handleSessionEvent(int state);
     void invokeSessionCallbacks(bool isReconnect);
@@ -98,7 +100,7 @@ private:
     std::vector<std::pair<void *, SessionCallback>> sessionCallbacks_;
 
     std::mutex watchMu_;
-    // 每个路径复用稳定的 WatchCtx；fn 为空表示已停用、等待会话关闭后释放
+    // 每个路径复用稳定的 WatchCtx；callback 为空表示已停用、等待会话关闭后释放
     std::map<std::string, std::shared_ptr<WatchCtx>> watches_;
 
     std::atomic<bool> reinitPending_{false};

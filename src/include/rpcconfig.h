@@ -24,5 +24,5 @@ private:
     // 配置项按键保存；重复键以后出现的值为准
     std::unordered_map<std::string, std::string> m_configMap;
     // 去掉字符串前后的空格
-    void Trim(std::string &src_buf);
+    void Trim(std::string &text);
 };

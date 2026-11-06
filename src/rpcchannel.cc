@@ -82,18 +82,18 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
     }
     std::string packet;
     int64_t timeoutMs = kMprpcChannelDefaultTimeoutMs;
-    if (auto *ctrl = dynamic_cast<MprpcController *>(controller))
+    if (auto *rpcController = dynamic_cast<MprpcController *>(controller))
     {
-        if (ctrl->RpcTimeoutMs() > 0)
+        if (rpcController->RpcTimeoutMs() > 0)
         {
-            timeoutMs = ctrl->RpcTimeoutMs();
+            timeoutMs = rpcController->RpcTimeoutMs();
         }
-        if (ctrl->HasDeadline())
+        if (rpcController->HasDeadline())
         {
-            const int64_t remainingMs = ctrl->RemainingMs();
+            const int64_t remainingMs = rpcController->RemainingMs();
             if (remainingMs <= 0)
             {
-                ctrl->SetFailed("rpc deadline exceeded");
+                rpcController->SetFailed("rpc deadline exceeded");
                 if (done)
                 {
                     done->Run();
@@ -102,7 +102,7 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
             }
             timeoutMs = std::min(timeoutMs, remainingMs);
         }
-        header.set_trace_id(ctrl->traceId());
+        header.set_trace_id(rpcController->traceId());
     }
     timeoutMs = std::min<int64_t>(timeoutMs,
                                   std::numeric_limits<uint32_t>::max());
@@ -156,9 +156,9 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
         m_pendingCalls[req_id] = call;
     }
 
-    if (auto *ctrl = dynamic_cast<MprpcController *>(controller))
+    if (auto *rpcController = dynamic_cast<MprpcController *>(controller))
     {
-        ctrl->setCancelCallback(
+        rpcController->setCancelCallback(
             [weak_this, req_id]()
             {
                 if (auto self = weak_this.lock())
@@ -181,8 +181,9 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
     bool stillPending = false;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        auto it = m_pendingCalls.find(req_id);
-        if (it != m_pendingCalls.end() && it->second == call)
+        auto pendingCallEntry = m_pendingCalls.find(req_id);
+        if (pendingCallEntry != m_pendingCalls.end() &&
+            pendingCallEntry->second == call)
         {
             call->timerId = timer;
             stillPending = true;
@@ -216,9 +217,9 @@ void MprpcChannel::onConnection(const TcpConnectionPtr &conn)
             unsent.swap(m_unsentPackets);
         }
 
-        for (const auto &kv : unsent)
+        for (const auto &queuedPacket : unsent)
         {
-            sendRequestInLoop(kv.first, kv.second);
+            sendRequestInLoop(queuedPacket.first, queuedPacket.second);
         }
     }
     else
@@ -230,16 +231,17 @@ void MprpcChannel::onConnection(const TcpConnectionPtr &conn)
         std::vector<std::shared_ptr<PendingCall>> pending;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            for (auto it = m_pendingCalls.begin(); it != m_pendingCalls.end();)
+            for (auto pendingCallEntry = m_pendingCalls.begin();
+                 pendingCallEntry != m_pendingCalls.end();)
             {
-                if (it->second->sent)
+                if (pendingCallEntry->second->sent)
                 {
-                    pending.push_back(it->second);
-                    it = m_pendingCalls.erase(it);
+                    pending.push_back(pendingCallEntry->second);
+                    pendingCallEntry = m_pendingCalls.erase(pendingCallEntry);
                 }
                 else
                 {
-                    ++it;
+                    ++pendingCallEntry;
                 }
             }
         }
@@ -348,14 +350,14 @@ std::shared_ptr<MprpcChannel::PendingCall>
 MprpcChannel::takePendingCall(uint64_t req_id)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_pendingCalls.find(req_id);
-    if (it == m_pendingCalls.end())
+    auto pendingCallEntry = m_pendingCalls.find(req_id);
+    if (pendingCallEntry == m_pendingCalls.end())
     {
         return std::shared_ptr<PendingCall>();
     }
 
-    std::shared_ptr<PendingCall> call = it->second;
-    m_pendingCalls.erase(it);
+    std::shared_ptr<PendingCall> call = pendingCallEntry->second;
+    m_pendingCalls.erase(pendingCallEntry);
     m_unsentPackets.erase(
         std::remove_if(m_unsentPackets.begin(), m_unsentPackets.end(),
                        [req_id](const std::pair<uint64_t, std::string> &packet)
@@ -370,20 +372,20 @@ void MprpcChannel::sendRequestInLoop(uint64_t req_id, const std::string &packet)
     bool shouldSend = false;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        auto it = m_pendingCalls.find(req_id);
-        if (it == m_pendingCalls.end() || it->second->sent)
+        auto pendingCallEntry = m_pendingCalls.find(req_id);
+        if (pendingCallEntry == m_pendingCalls.end() || pendingCallEntry->second->sent)
         {
             return;
         }
         if (conn && conn->connected())
         {
-            it->second->queued = false;
-            it->second->sent = true;
+            pendingCallEntry->second->queued = false;
+            pendingCallEntry->second->sent = true;
             shouldSend = true;
         }
-        else if (!it->second->queued)
+        else if (!pendingCallEntry->second->queued)
         {
-            it->second->queued = true;
+            pendingCallEntry->second->queued = true;
             m_unsentPackets.push_back(std::make_pair(req_id, packet));
         }
     }

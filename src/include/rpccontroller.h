@@ -43,7 +43,10 @@ public:
     void setTraceId(uint64_t id) { traceId_.store(id, std::memory_order_relaxed); }
     uint64_t traceId() const { return traceId_.load(std::memory_order_relaxed); }
 
-    void SetIdempotent(bool v) { idempotent_.store(v, std::memory_order_relaxed); }
+    void SetIdempotent(bool idempotent)
+    {
+        idempotent_.store(idempotent, std::memory_order_relaxed);
+    }
     bool Idempotent() const { return idempotent_.load(std::memory_order_relaxed); }
 
 private:
