@@ -187,6 +187,7 @@ class RpcHeader PROTOBUF_FINAL :
     kRawSizeFieldNumber = 8,
     kDeadlineMsFieldNumber = 9,
     kFlagsFieldNumber = 10,
+    kControlFieldNumber = 11,
   };
   // bytes service_name = 1;
   void clear_service_name();
@@ -299,6 +300,15 @@ class RpcHeader PROTOBUF_FINAL :
   void _internal_set_flags(::PROTOBUF_NAMESPACE_ID::uint32 value);
   public:
 
+  // uint32 control = 11;
+  void clear_control();
+  ::PROTOBUF_NAMESPACE_ID::uint32 control() const;
+  void set_control(::PROTOBUF_NAMESPACE_ID::uint32 value);
+  private:
+  ::PROTOBUF_NAMESPACE_ID::uint32 _internal_control() const;
+  void _internal_set_control(::PROTOBUF_NAMESPACE_ID::uint32 value);
+  public:
+
   // @@protoc_insertion_point(class_scope:mprpc.RpcHeader)
  private:
   class _Internal;
@@ -316,6 +326,7 @@ class RpcHeader PROTOBUF_FINAL :
   ::PROTOBUF_NAMESPACE_ID::uint32 raw_size_;
   ::PROTOBUF_NAMESPACE_ID::uint32 deadline_ms_;
   ::PROTOBUF_NAMESPACE_ID::uint32 flags_;
+  ::PROTOBUF_NAMESPACE_ID::uint32 control_;
   mutable ::PROTOBUF_NAMESPACE_ID::internal::CachedSize _cached_size_;
   friend struct ::TableStruct_rpcheader_2eproto;
 };
@@ -651,6 +662,26 @@ inline void RpcHeader::_internal_set_flags(::PROTOBUF_NAMESPACE_ID::uint32 value
 inline void RpcHeader::set_flags(::PROTOBUF_NAMESPACE_ID::uint32 value) {
   _internal_set_flags(value);
   // @@protoc_insertion_point(field_set:mprpc.RpcHeader.flags)
+}
+
+// uint32 control = 11;
+inline void RpcHeader::clear_control() {
+  control_ = 0u;
+}
+inline ::PROTOBUF_NAMESPACE_ID::uint32 RpcHeader::_internal_control() const {
+  return control_;
+}
+inline ::PROTOBUF_NAMESPACE_ID::uint32 RpcHeader::control() const {
+  // @@protoc_insertion_point(field_get:mprpc.RpcHeader.control)
+  return _internal_control();
+}
+inline void RpcHeader::_internal_set_control(::PROTOBUF_NAMESPACE_ID::uint32 value) {
+  
+  control_ = value;
+}
+inline void RpcHeader::set_control(::PROTOBUF_NAMESPACE_ID::uint32 value) {
+  _internal_set_control(value);
+  // @@protoc_insertion_point(field_set:mprpc.RpcHeader.control)
 }
 
 #ifdef __GNUC__

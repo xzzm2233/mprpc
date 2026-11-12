@@ -18,10 +18,11 @@ public:
     int LoadInt(const std::string &key, int def);
     // 支持 1/0、true/false、yes/no、on/off，忽略字母大小写
     bool LoadBool(const std::string &key, bool def);
+    // 缺失或空值时返回默认值，格式非法或非有限值时记录错误并返回默认值
     double LoadDouble(const std::string &key, double def);
 
 private:
-    // 配置项按键保存；重复键以后出现的值为准
+    // 配置项按键保存，重复键以后出现的值为准
     std::unordered_map<std::string, std::string> m_configMap;
     // 去掉字符串前后的空格
     void Trim(std::string &text);

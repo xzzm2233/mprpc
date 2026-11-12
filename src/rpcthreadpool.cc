@@ -33,7 +33,7 @@ void RpcThreadPool::start()
 
 void RpcThreadPool::stop()
 {
-    // 设置停止标志并唤醒所有线程；worker 会先完成已排队任务再退出
+    // 设置停止标志并唤醒所有线程，worker 会先完成已排队任务再退出
     {
         std::lock_guard<std::mutex> lock(mu_);
         if (stopping_ && workers_.empty())

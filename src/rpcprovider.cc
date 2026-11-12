@@ -18,7 +18,14 @@
 #include <thread>
 #include <utility>
 
-// 每个 IO loop 线程独立维护连接解析状态；同一连接的事件固定由同一 loop 处理
+struct RpcActiveCall
+{
+    std::shared_ptr<MprpcController> controller;
+    // 0=active, 1=cancel requested, 2=completed，CAS 决定取消与完成的先后
+    std::atomic<int> state{0};
+};
+
+// 每个 IO loop 线程独立维护连接解析状态，同一连接的事件固定由同一 loop 处理
 // 每个 IO 线程自己的连接解析状态
 // muduo 保证一条连接的读写事件固定落在同一个 loop 线程，因此无需加锁
 struct RpcProviderConnState
@@ -40,6 +47,95 @@ static int64_t RpcProviderSteadyNowNs()
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
 }
+
+template <typename T>
+static bool TryReserveAtomic(std::atomic<T> &counter, T amount, T limit)
+{
+    // CAS 在并发 IO loop 间原子预留容量，避免“先检查再递增”超出上限
+    if (amount > limit)
+    {
+        return false;
+    }
+
+    T current = counter.load(std::memory_order_relaxed);
+    while (current <= limit - amount)
+    {
+        if (counter.compare_exchange_weak(current, current + amount,
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_relaxed))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+struct RpcQuotaReservation
+{
+    std::atomic<int> *globalInflight;
+    std::atomic<size_t> *globalBytes;
+    std::shared_ptr<RpcConnStats> stats;
+    size_t bytes;
+    bool hasGlobalInflight = false;
+    bool hasGlobalBytes = false;
+    bool hasConnInflight = false;
+    bool hasConnBytes = false;
+
+    // 获取过程失败或解析提前返回时，析构自动归还已成功预留的配额
+    RpcQuotaReservation(std::atomic<int> *globalInflightCounter,
+                        std::atomic<size_t> *globalByteCounter,
+                        const std::shared_ptr<RpcConnStats> &connectionStats,
+                        size_t accountedBytes)
+        : globalInflight(globalInflightCounter),
+          globalBytes(globalByteCounter),
+          stats(connectionStats),
+          bytes(accountedBytes)
+    {
+    }
+
+    ~RpcQuotaReservation()
+    {
+        if (hasGlobalInflight)
+            globalInflight->fetch_sub(1, std::memory_order_release);
+        if (hasGlobalBytes)
+            globalBytes->fetch_sub(bytes, std::memory_order_release);
+        if (hasConnInflight)
+            stats->inflight.fetch_sub(1, std::memory_order_release);
+        if (hasConnBytes)
+            stats->inflightBytes.fetch_sub(bytes, std::memory_order_release);
+    }
+
+    bool acquire(int globalInflightLimit, int connInflightLimit,
+                 size_t globalByteLimit, size_t connByteLimit)
+    {
+        hasGlobalInflight =
+            TryReserveAtomic(*globalInflight, 1, globalInflightLimit);
+        if (!hasGlobalInflight)
+            return false;
+
+        hasGlobalBytes =
+            TryReserveAtomic(*globalBytes, bytes, globalByteLimit);
+        if (!hasGlobalBytes)
+            return false;
+
+        hasConnInflight =
+            TryReserveAtomic(stats->inflight, 1, connInflightLimit);
+        if (!hasConnInflight)
+            return false;
+
+        hasConnBytes =
+            TryReserveAtomic(stats->inflightBytes, bytes, connByteLimit);
+        return hasConnBytes;
+    }
+
+    void transfer()
+    {
+        hasGlobalInflight = false;
+        hasGlobalBytes = false;
+        hasConnInflight = false;
+        hasConnBytes = false;
+    }
+};
 
 // 注册到 ZK 的一个节点
 struct RpcProviderZkNode
@@ -64,7 +160,7 @@ static int LoadBoundedInt(MprpcConfig &config, const std::string &key,
 
 void RpcProvider::NotifyService(google::protobuf::Service *service)
 {
-    // 注册服务描述符和方法表；Run() 启动后这些表只读
+    // 注册服务描述符和方法表，Run() 启动后这些表只读
     if (!service)
     {
         LOG_ERROR("cannot register a null protobuf service");
@@ -116,6 +212,15 @@ void RpcProvider::Run()
 
     m_ioThreads = LoadBoundedInt(config, "rpcserveriothreads", 4, 1, 256);
     m_maxInflight = LoadBoundedInt(config, "rpcmaxinflight", 1024, 1, INT_MAX);
+    // 新增全局并发及 payload 字节预算，旧 rpcmaxinflight 仍是连接级限制
+    m_maxGlobalInflight =
+        LoadBoundedInt(config, "rpcmaxglobalinflight", 8192, 1, INT_MAX);
+    m_maxGlobalInflightBytes = static_cast<size_t>(
+        LoadBoundedInt(config, "rpcmaxglobalinflightbytes", 512 * 1024 * 1024,
+                       1, INT_MAX));
+    m_maxConnInflightBytes = static_cast<size_t>(
+        LoadBoundedInt(config, "rpcmaxconninflightbytes", 128 * 1024 * 1024,
+                       1, INT_MAX));
     m_highWater = static_cast<size_t>(LoadBoundedInt(config, "rpchighwater", 8 * 1024 * 1024, 1, INT_MAX));
     m_compress = config.LoadBool("rpccompress", true);
     m_compressLevel = LoadBoundedInt(config, "rpccompresslevel", 3, ZSTD_minCLevel(), ZSTD_maxCLevel());
@@ -145,7 +250,7 @@ void RpcProvider::Run()
                                         std::placeholders::_3));
     server.setThreadNum(m_ioThreads);
 
-    // ---- ZooKeeper 注册（可关闭；关闭后仅直连地址可用）----
+    // ---- ZooKeeper 注册（可关闭，关闭后仅直连地址可用）----
     const bool useZk = config.LoadBool("zooenabled", !config.Load("zookeeperip", "").empty());
     if (useZk)
     {
@@ -206,8 +311,10 @@ void RpcProvider::Run()
     }
 
     LOG_INFO("RpcProvider start service at ip:%s port:%u iothreads=%d workers=%d "
-             "maxinflight=%d compress=%d",
-             ip.c_str(), port, m_ioThreads, workers, m_maxInflight, m_compress ? 1 : 0);
+             "maxinflight=%d globalmaxinflight=%d globalbytes=%zu connbytes=%zu compress=%d",
+             ip.c_str(), port, m_ioThreads, workers, m_maxInflight,
+             m_maxGlobalInflight, m_maxGlobalInflightBytes,
+             m_maxConnInflightBytes, m_compress ? 1 : 0);
 
     server.start();
     m_eventLoop.loop();
@@ -225,7 +332,7 @@ void RpcProvider::Run()
 
 void RpcProvider::OnConnection(const TcpConnectionPtr &conn)
 {
-    // 新连接初始化解析状态；关闭时清除线程本地状态
+    // 新连接初始化解析状态，关闭时清除线程本地状态
     if (conn->connected())
     {
         RpcProviderConnState &connectionState = RpcProviderConnStates()[conn.get()];
@@ -248,8 +355,57 @@ void RpcProvider::OnConnection(const TcpConnectionPtr &conn)
     }
     else
     {
+        // 连接关闭时通知仍在运行的 handler 协作取消，避免孤儿业务继续工作
+        std::vector<std::shared_ptr<RpcActiveCall>> activeCalls;
+        auto connectionStateIterator = RpcProviderConnStates().find(conn.get());
+        if (connectionStateIterator != RpcProviderConnStates().end() &&
+            connectionStateIterator->second.stats)
+        {
+            std::lock_guard<std::mutex> lock(connectionStateIterator->second.stats->activeMu);
+            for (auto &entry : connectionStateIterator->second.stats->activeCalls)
+            {
+                if (std::shared_ptr<RpcActiveCall> activeCall = entry.second.lock())
+                {
+                    activeCalls.push_back(std::move(activeCall));
+                }
+            }
+            connectionStateIterator->second.stats->activeCalls.clear();
+        }
+        for (const auto &activeCall : activeCalls)
+        {
+            int expected = 0;
+            if (activeCall->state.compare_exchange_strong(expected, 1,
+                                                          std::memory_order_acq_rel))
+            {
+                activeCall->controller->StartCancel();
+            }
+        }
         RpcProviderConnStates().erase(conn.get());
         LOG_INFO("connection closed: %s", conn->peerAddress().toIpPort().c_str());
+    }
+}
+
+void RpcProvider::CancelRequest(const std::shared_ptr<RpcConnStats> &stats,
+                                uint64_t reqId)
+{
+    std::shared_ptr<RpcActiveCall> activeCall;
+    {
+        std::lock_guard<std::mutex> lock(stats->activeMu);
+        auto active = stats->activeCalls.find(reqId);
+        if (active != stats->activeCalls.end())
+        {
+            activeCall = active->second.lock();
+        }
+    }
+    if (activeCall)
+    {
+        // 只有尚未完成的调用能赢得取消竞争，重复/迟到取消会被忽略
+        int expected = 0;
+        if (activeCall->state.compare_exchange_strong(expected, 1,
+                                                      std::memory_order_acq_rel))
+        {
+            activeCall->controller->StartCancel();
+        }
     }
 }
 
@@ -328,6 +484,16 @@ void RpcProvider::OnMessage(const TcpConnectionPtr &conn,
         }
 
         const size_t totalFrameSize = connectionState.frame.totalSize();
+        if (connectionState.frame.header.control() == kRpcFrameControlCancel)
+        {
+            // 控制帧不进入服务分发或业务线程池
+            const uint64_t reqId = connectionState.frame.header.req_id();
+            buffer->retrieve(totalFrameSize);
+            connectionState.frame.reset();
+            CancelRequest(connectionState.stats, reqId);
+            continue;
+        }
+
         // body 需要拷贝：交给工作线程后，inputBuffer 会被后续读写改写/搬移
         std::string requestBody(base + 4 + connectionState.frame.headerSize,
                                 connectionState.frame.header.args_size());
@@ -350,18 +516,9 @@ void RpcProvider::ProcessRequest(const TcpConnectionPtr &conn,
     const RpcFrameHeader &header = frame.header;
     const uint64_t reqId = header.req_id();
     const uint64_t traceId = header.trace_id();
-    const std::string methodKey = header.service_name() + "." + header.method_name();
+    // 未注册的名称来自网络输入，统一归类以避免指标标签无限增长
+    std::string methodKey = "__unknown_request__";
     const int64_t now = RpcProviderSteadyNowNs();
-
-    // ---- 准入控制：连接积压 / 在途超限 → 直接拒掉，不进业务线程池 ----
-    if (stats->overloaded.load(std::memory_order_relaxed) ||
-        stats->inflight.load(std::memory_order_relaxed) >= m_maxInflight)
-    {
-        RpcMetrics::instance().record("server", methodKey, now - startNs, false, false, true);
-        SendError(conn, reqId, traceId, kRpcFrameServerBusy,
-                  "server busy: inflight limit or output backpressure");
-        return;
-    }
 
     // ---- deadline 已耗尽：不再消耗业务资源 ----
     int64_t deadlineNs = 0;
@@ -384,20 +541,69 @@ void RpcProvider::ProcessRequest(const TcpConnectionPtr &conn,
     {
         RpcMetrics::instance().record("server", methodKey, now - startNs, false, false, false);
         SendError(conn, reqId, traceId, kRpcFrameNotFound,
-                  header.service_name() + " not exist");
+                  "service or method not found");
         return;
     }
     auto methodEntry = serviceEntry->second.methods.find(header.method_name());
     if (methodEntry == serviceEntry->second.methods.end())
     {
-        RpcMetrics::instance().record("server", methodKey, now - startNs, false, false, false);
+        RpcMetrics::instance().record("server", "__unknown_request__",
+                                      now - startNs, false, false, false);
         SendError(conn, reqId, traceId, kRpcFrameNotFound,
-                  methodKey + " not exist");
+                  "service or method not found");
         return;
     }
 
+    methodKey = serviceEntry->first + "." + methodEntry->first;
     google::protobuf::Service *service = serviceEntry->second.service;
     const google::protobuf::MethodDescriptor *method = methodEntry->second;
+
+    // Reserve capacity before decompression and protobuf allocation. Account for
+    // both the retained wire body and its expanded representation
+    const size_t rawBodySize = header.raw_size() == 0
+                                   ? args.size()
+                                   : static_cast<size_t>(header.raw_size());
+    const size_t accountedBytes = args.size() + rawBodySize;
+    RpcQuotaReservation reservation(&m_globalInflight, &m_globalInflightBytes,
+                                    stats, accountedBytes);
+    if (stats->overloaded.load(std::memory_order_relaxed) ||
+        !reservation.acquire(m_maxGlobalInflight, m_maxInflight,
+                             m_maxGlobalInflightBytes, m_maxConnInflightBytes))
+    {
+        RpcMetrics::instance().record("server", methodKey, now - startNs,
+                                      false, false, true);
+        SendError(conn, reqId, traceId, kRpcFrameServerBusy,
+                  "server busy: inflight or request memory limit");
+        return;
+    }
+
+    std::shared_ptr<MprpcController> controller(new MprpcController());
+    controller->setTraceId(traceId);
+    if (header.deadline_ms() > 0)
+    {
+        // 把剩余预算写进 controller：处理过程中再发起下游 RPC 时可继续透传
+        const int64_t remainMs =
+            (deadlineNs - RpcProviderSteadyNowNs()) / 1000000;
+        controller->SetDeadline(static_cast<uint32_t>(remainMs > 0 ? remainMs : 1));
+    }
+
+    std::shared_ptr<RpcActiveCall> activeCall(new RpcActiveCall());
+    activeCall->controller = controller;
+    bool registeredRequest = false;
+    {
+        std::lock_guard<std::mutex> lock(stats->activeMu);
+        registeredRequest = stats->activeCalls.emplace(reqId, activeCall).second;
+    }
+    if (!registeredRequest)
+    {
+        RpcMetrics::instance().record("server", methodKey, now - startNs,
+                                      false, false, false);
+        LOG_ERROR("duplicate request id=%llu on %s; closing ambiguous connection",
+                  static_cast<unsigned long long>(reqId),
+                  conn->peerAddress().toIpPort().c_str());
+        conn->shutdown();
+        return;
+    }
 
     // ---- 反序列化 ----
     std::string decompressedArgs;
@@ -413,6 +619,10 @@ void RpcProvider::ProcessRequest(const TcpConnectionPtr &conn,
         {
             RpcMetrics::instance().record("server", methodKey, now - startNs,
                                           false, false, false);
+            {
+                std::lock_guard<std::mutex> lock(stats->activeMu);
+                stats->activeCalls.erase(reqId);
+            }
             SendError(conn, reqId, traceId, kRpcFrameBadRequest,
                       "request decompression failed");
             return;
@@ -422,41 +632,37 @@ void RpcProvider::ProcessRequest(const TcpConnectionPtr &conn,
 
     std::unique_ptr<google::protobuf::Message> request(
         service->GetRequestPrototype(method).New());
-        
+
     if (!request->ParseFromArray(requestArgs->data(),
                                  static_cast<int>(requestArgs->size())))
     {
         RpcMetrics::instance().record("server", methodKey, now - startNs, false, false, false);
+        {
+            std::lock_guard<std::mutex> lock(stats->activeMu);
+            stats->activeCalls.erase(reqId);
+        }
         SendError(conn, reqId, traceId, kRpcFrameBadRequest, "request parse error");
         return;
     }
     std::unique_ptr<google::protobuf::Message> response(
         service->GetResponsePrototype(method).New());
 
-    auto *controller = new MprpcController();
-    controller->setTraceId(traceId);
-    if (header.deadline_ms() > 0)
-    {
-        // 把剩余预算写进 controller：处理过程中再发起下游 RPC 时可继续透传
-        const int64_t remainMs =
-            (deadlineNs - RpcProviderSteadyNowNs()) / 1000000;
-        controller->SetDeadline(static_cast<uint32_t>(remainMs > 0 ? remainMs : 1));
-    }
-
     auto *context = new RpcContext();
     context->conn = conn;
     context->reqId = reqId;
     context->traceId = traceId;
     context->stats = stats;
+    context->activeCall = activeCall;
+    context->accountedBytes = accountedBytes;
     context->methodKey = methodKey;
     context->startNs = startNs;
     context->deadlineNs = deadlineNs;
     context->request = std::move(request);
     context->response = std::move(response);
-    context->controller.reset(controller);
+    context->controller = controller;
 
     // ---- 在途计数 + 投递业务线程池 ----
-    stats->inflight.fetch_add(1, std::memory_order_relaxed);
+    reservation.transfer();
     RpcMetrics::instance().inflightUp("server", methodKey);
 
     google::protobuf::Closure *done =
@@ -466,6 +672,13 @@ void RpcProvider::ProcessRequest(const TcpConnectionPtr &conn,
                                           {
                                               try
                                               {
+                                                  // 请求排队期间若已取消，不再启动 handler
+                                                  if (context->activeCall->state.load(
+                                                          std::memory_order_acquire) == 1)
+                                                  {
+                                                      done->Run();
+                                                      return;
+                                                  }
                                                   service->CallMethod(method, context->controller.get(),
                                                                       context->request.get(), context->response.get(), done);
                                               }
@@ -484,7 +697,7 @@ void RpcProvider::ProcessRequest(const TcpConnectionPtr &conn,
 
     if (!queued)
     {
-        // 队列满：回滚准入并回 429；done 仍然要 Run 一次以回收 context
+        // 队列满：回滚准入并回 429，done 仍然要 Run 一次以回收 context
         context->rejected = true;
         RpcMetrics::instance().record("server", methodKey,
                                       RpcProviderSteadyNowNs() - startNs,
@@ -499,10 +712,20 @@ void RpcProvider::OnResponse(RpcContext *context)
     // 业务闭包可能在任意工作线程执行，TcpConnection::send 会负责跨线程投递
     const int64_t now = RpcProviderSteadyNowNs();
     const int64_t latency = now - context->startNs;
+    // 完成状态先于响应处理发布，之后到达的取消不再改变结果
+    const int callState =
+        context->activeCall->state.exchange(2, std::memory_order_acq_rel);
 
     if (!context->rejected)
     {
-        if (context->deadlineNs > 0 && now > context->deadlineNs)
+        if (callState == 1)
+        {
+            RpcMetrics::instance().record("server", context->methodKey, latency,
+                                          false, false, false);
+            SendError(context->conn, context->reqId, context->traceId,
+                      kRpcFrameCanceled, "rpc canceled");
+        }
+        else if (context->deadlineNs > 0 && now > context->deadlineNs)
         {
             RpcMetrics::instance().record("server", context->methodKey, latency, false, true, false);
             char msg[128];
@@ -524,7 +747,16 @@ void RpcProvider::OnResponse(RpcContext *context)
         }
     }
 
-    context->stats->inflight.fetch_sub(1, std::memory_order_relaxed);
+    context->stats->inflight.fetch_sub(1, std::memory_order_release);
+    context->stats->inflightBytes.fetch_sub(context->accountedBytes,
+                                            std::memory_order_release);
+    m_globalInflight.fetch_sub(1, std::memory_order_release);
+    m_globalInflightBytes.fetch_sub(context->accountedBytes,
+                                    std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(context->stats->activeMu);
+        context->stats->activeCalls.erase(context->reqId);
+    }
     RpcMetrics::instance().inflightDown("server", context->methodKey);
     delete context;
 }
@@ -532,7 +764,7 @@ void RpcProvider::OnResponse(RpcContext *context)
 void RpcProvider::SendResponse(const TcpConnectionPtr &conn, uint64_t reqId, uint64_t traceId,
                                google::protobuf::Message *response)
 {
-    // 先尝试压缩大响应；压缩失败或未变小时回退到原始 protobuf body
+    // 先尝试压缩大响应，压缩失败或未变小时回退到原始 protobuf body
     const size_t rawSize = response->ByteSizeLong();
     if (rawSize > kRpcFrameMaxBodySize)
     {

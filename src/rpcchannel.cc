@@ -1,13 +1,19 @@
 #include "rpcchannel.h"
 #include "rpccontroller.h"
+#include "zookeeperutil.h"
 
 #include <mymuduo/Logger.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <stdexcept>
 #include <utility>
+
+#include <arpa/inet.h>
 
 static const int64_t kMprpcChannelDefaultTimeoutMs = 30000;
 
@@ -15,20 +21,76 @@ static const int64_t kMprpcChannelDefaultTimeoutMs = 30000;
 MprpcChannel::MprpcChannel(EventLoop *loop, const InetAddress &serverAddr)
     : loop_(loop),
       client_(loop, serverAddr, "MprpcChannel"),
+      callbackOwner_(new CallbackOwner()),
       m_reqId(1)
 {
-    client_.setConnectionCallback(std::bind(&MprpcChannel::onConnection, this,
-                                            std::placeholders::_1));
-    client_.setMessageCallback(std::bind(&MprpcChannel::onMessage, this,
-                                         std::placeholders::_1,
-                                         std::placeholders::_2,
-                                         std::placeholders::_3));
+    // 回调可能在连接生命周期内晚到，先锁弱引用，避免捕获裸 this
+    const std::shared_ptr<CallbackOwner> callbackOwner = callbackOwner_;
+    client_.setConnectionCallback(
+        [callbackOwner](const TcpConnectionPtr &conn)
+        {
+            std::shared_ptr<MprpcChannel> channel;
+            {
+                std::lock_guard<std::mutex> lock(callbackOwner->mutex);
+                channel = callbackOwner->channel.lock();
+            }
+            if (channel)
+            {
+                channel->onConnection(conn);
+            }
+        });
+    client_.setMessageCallback(
+        [callbackOwner](const TcpConnectionPtr &conn, Buffer *buffer, Timestamp time)
+        {
+            std::shared_ptr<MprpcChannel> channel;
+            {
+                std::lock_guard<std::mutex> lock(callbackOwner->mutex);
+                channel = callbackOwner->channel.lock();
+            }
+            if (channel)
+            {
+                channel->onMessage(conn, buffer, time);
+            }
+        });
     client_.enableRetry();
     client_.connect();
 }
 
 MprpcChannel::~MprpcChannel()
 {
+    std::vector<std::pair<uint64_t, std::shared_ptr<PendingCall>>> pendingCalls;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        pendingCalls.reserve(m_pendingCalls.size());
+        for (auto &entry : m_pendingCalls)
+        {
+            pendingCalls.emplace_back(entry.first, std::move(entry.second));
+        }
+        m_pendingCalls.clear();
+        m_unsentPackets.clear();
+    }
+
+    for (const auto &entry : pendingCalls)
+    {
+        const uint64_t reqId = entry.first;
+        const std::shared_ptr<PendingCall> &call = entry.second;
+        loop_->cancel(call->timerId);
+        sendCancelInLoop(reqId, call);
+
+        if (call->controller)
+        {
+            call->controller->SetFailed("rpc channel destroyed");
+            if (MprpcController *rpcController =
+                    dynamic_cast<MprpcController *>(call->controller))
+            {
+                rpcController->setCancelCallback(std::function<void()>());
+            }
+        }
+        if (call->done)
+        {
+            call->done->Run();
+        }
+    }
 }
 
 void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
@@ -145,6 +207,11 @@ void MprpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
         }
         return;
     }
+    {
+        // 仅在 CallMethod 可取得 shared_ptr 后发布 owner，TCP 回调据此安全锁定对象
+        std::lock_guard<std::mutex> lock(callbackOwner_->mutex);
+        callbackOwner_->channel = weak_this;
+    }
 
     auto call = std::make_shared<PendingCall>();
     call->controller = controller;
@@ -257,11 +324,15 @@ void MprpcChannel::onConnection(const TcpConnectionPtr &conn)
                 call->done->Run();
             }
         }
+        if (disconnectedCallback_)
+        {
+            disconnectedCallback_();
+        }
     }
 }
 void MprpcChannel::onMessage(const TcpConnectionPtr &conn, Buffer *buffer, Timestamp time)
 {
-    // 响应按帧增量解析；完整帧可能一次收到多条
+    // 响应按帧增量解析，完整帧可能一次收到多条
     (void)time;
     for (;;)
     {
@@ -314,7 +385,7 @@ void MprpcChannel::onMessage(const TcpConnectionPtr &conn, Buffer *buffer, Times
 void MprpcChannel::onResponse(const RpcFrameHeader &header,
                               const std::string &body)
 {
-    // req_id 将响应关联到原始调用；查找不到时说明调用已超时或取消
+    // req_id 将响应关联到原始调用，查找不到时说明调用已超时或取消
     uint64_t req_id = header.req_id();
 
     std::shared_ptr<PendingCall> call = takePendingCall(req_id);
@@ -381,6 +452,7 @@ void MprpcChannel::sendRequestInLoop(uint64_t req_id, const std::string &packet)
         {
             pendingCallEntry->second->queued = false;
             pendingCallEntry->second->sent = true;
+            pendingCallEntry->second->connection = conn;
             shouldSend = true;
         }
         else if (!pendingCallEntry->second->queued)
@@ -418,6 +490,7 @@ void MprpcChannel::cancelInLoop(uint64_t req_id)
     }
 
     loop_->cancel(call->timerId);
+    sendCancelInLoop(req_id, call);
 
     if (call->controller)
     {
@@ -438,6 +511,8 @@ void MprpcChannel::onTimeout(uint64_t req_id)
         return;
     }
 
+    sendCancelInLoop(req_id, call);
+
     if (call->controller)
     {
         call->controller->SetFailed("rpc timeout");
@@ -445,5 +520,361 @@ void MprpcChannel::onTimeout(uint64_t req_id)
     if (call->done)
     {
         call->done->Run();
+    }
+}
+
+size_t MprpcChannel::pendingCallCount() const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_pendingCalls.size();
+}
+
+class DiscoveryDone : public google::protobuf::Closure
+{
+public:
+    DiscoveryDone(const std::shared_ptr<MprpcDiscoveryChannel> &owner,
+                  google::protobuf::Closure *done)
+        : owner_(owner), done_(done)
+    {
+    }
+
+    void Run() override
+    {
+        std::shared_ptr<MprpcDiscoveryChannel> owner = owner_.lock();
+        google::protobuf::Closure *done = done_;
+        delete this;
+        if (done)
+        {
+            done->Run();
+        }
+        if (owner)
+        {
+            owner->SchedulePrune();
+        }
+    }
+
+private:
+    std::weak_ptr<MprpcDiscoveryChannel> owner_;
+    google::protobuf::Closure *done_;
+};
+
+MprpcDiscoveryChannel::MprpcDiscoveryChannel(
+    EventLoop *loop, const std::string &serviceName, double zkConnectTimeoutSec)
+    : loop_(loop),
+      serviceName_(serviceName),
+      zkConnectTimeoutSec_(zkConnectTimeoutSec)
+{
+    if (!loop_ || serviceName_.empty() ||
+        !std::isfinite(zkConnectTimeoutSec_) || zkConnectTimeoutSec_ <= 0.0)
+    {
+        throw std::invalid_argument("invalid discovery channel configuration");
+    }
+    // Start 有界等待，若超时，首次调用时还会重试连接
+    zkReady_ = ZkClient::global().Start(zkConnectTimeoutSec_);
+    if (!zkReady_)
+    {
+        LOG_ERROR("discovery channel for %s created without ZooKeeper connection",
+                  serviceName_.c_str());
+    }
+}
+
+MprpcDiscoveryChannel::~MprpcDiscoveryChannel()
+{
+    for (const std::string &path : watchedPaths_)
+    {
+        ZkClient::global().removeWatch(path.c_str(), this);
+    }
+}
+
+bool MprpcDiscoveryChannel::ParseEndpoint(const std::string &endpoint,
+                                          InetAddress *address) const
+{
+    const size_t separator = endpoint.rfind(':');
+    if (!address || separator == std::string::npos || separator == 0 ||
+        separator + 1 >= endpoint.size())
+    {
+        return false;
+    }
+
+    const std::string host = endpoint.substr(0, separator);
+    const std::string portText = endpoint.substr(separator + 1);
+    // mymuduo 的 InetAddress 使用 IPv4 sockaddr_in，拒绝无法路由的节点值
+    in_addr parsedAddress;
+    if (inet_pton(AF_INET, host.c_str(), &parsedAddress) != 1 ||
+        !std::all_of(portText.begin(), portText.end(),
+                     [](unsigned char digit)
+                     { return digit >= '0' && digit <= '9'; }))
+    {
+        return false;
+    }
+
+    char *end = nullptr;
+    const long port = std::strtol(portText.c_str(), &end, 10);
+    if (end == portText.c_str() || *end != '\0' || port < 1 || port > 65535)
+    {
+        return false;
+    }
+
+    *address = InetAddress(static_cast<uint16_t>(port), host);
+    return true;
+}
+
+void MprpcDiscoveryChannel::ApplyEndpointUpdate(
+    const std::string &methodKey, const std::vector<std::string> &children)
+{
+    std::vector<std::string> endpoints;
+    for (const std::string &child : children)
+    {
+        InetAddress address;
+        if (ParseEndpoint(child, &address))
+        {
+            endpoints.push_back(child);
+        }
+        else
+        {
+            LOG_ERROR("ignoring invalid service endpoint: %s", child.c_str());
+        }
+    }
+    std::sort(endpoints.begin(), endpoints.end());
+    endpoints.erase(std::unique(endpoints.begin(), endpoints.end()), endpoints.end());
+
+    // 固定排序使同一组节点在各客户端上的轮询顺序稳定
+    {
+        std::lock_guard<std::mutex> lock(discoveryMutex_);
+        methodEndpoints_[methodKey] = std::move(endpoints);
+    }
+    SchedulePrune();
+}
+
+void MprpcDiscoveryChannel::RefreshMethod(const std::string &methodKey,
+                                          const std::string &path)
+{
+    std::vector<std::string> children;
+    std::weak_ptr<MprpcDiscoveryChannel> weakThis = shared_from_this();
+    // 读取最新实例并重新安装一次性 watch
+    const bool found = ZkClient::global().GetChildrenData(
+        path.c_str(), children,
+        [weakThis, methodKey, path]()
+        {
+            if (std::shared_ptr<MprpcDiscoveryChannel> self = weakThis.lock())
+            {
+                self->RefreshMethod(methodKey, path);
+            }
+        },
+        this);
+    if (found)
+    {
+        ApplyEndpointUpdate(methodKey, children);
+    }
+    else
+    {
+        ApplyEndpointUpdate(methodKey, std::vector<std::string>());
+    }
+}
+
+void MprpcDiscoveryChannel::CallMethod(
+    const google::protobuf::MethodDescriptor *method,
+    google::protobuf::RpcController *controller,
+    const google::protobuf::Message *request,
+    google::protobuf::Message *response,
+    google::protobuf::Closure *done)
+{
+    auto failCall = [controller, done](const std::string &message)
+    {
+        if (controller)
+        {
+            controller->SetFailed(message);
+        }
+        if (done)
+        {
+            done->Run();
+        }
+    };
+
+    if (!method || !request || !response ||
+        method->service()->name() != serviceName_)
+    {
+        failCall("invalid RPC method or message for discovery channel");
+        return;
+    }
+
+    std::shared_ptr<MprpcDiscoveryChannel> self;
+    try
+    {
+        self = shared_from_this();
+    }
+    catch (const std::bad_weak_ptr &)
+    {
+        failCall("MprpcDiscoveryChannel must be owned by std::shared_ptr");
+        return;
+    }
+
+    bool zkReady = false;
+    {
+        std::lock_guard<std::mutex> lock(discoveryMutex_);
+        zkReady = zkReady_;
+    }
+    if (!zkReady && !ZkClient::global().Start(zkConnectTimeoutSec_))
+    {
+        failCall("zookeeper unavailable for service discovery");
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(discoveryMutex_);
+        zkReady_ = true;
+    }
+
+    const std::string methodName = method->name();
+    const std::string methodKey = serviceName_ + "." + methodName;
+    const std::string path = "/" + serviceName_ + "/" + methodName;
+    bool needWatch = false;
+    {
+        std::lock_guard<std::mutex> lock(discoveryMutex_);
+        needWatch = watchedPaths_.insert(path).second;
+    }
+    if (needWatch)
+    {
+        // 每个 service/method 首次调用时建立订阅，并立即读取现有实例
+        std::vector<std::string> children;
+        std::weak_ptr<MprpcDiscoveryChannel> weakThis = self;
+        const bool found = ZkClient::global().GetChildrenData(
+            path.c_str(), children,
+            [weakThis, methodKey, path]()
+            {
+                if (std::shared_ptr<MprpcDiscoveryChannel> channel = weakThis.lock())
+                {
+                    channel->RefreshMethod(methodKey, path);
+                }
+            },
+            this);
+        ApplyEndpointUpdate(methodKey,
+                            found ? children : std::vector<std::string>());
+    }
+
+    PruneRetiredClients();
+    std::shared_ptr<MprpcChannel> selectedClient;
+    std::string selectedEndpoint;
+    std::string selectionError;
+    {
+        std::lock_guard<std::mutex> lock(discoveryMutex_);
+        auto endpoints = methodEndpoints_.find(methodKey);
+        if (endpoints == methodEndpoints_.end() || endpoints->second.empty())
+        {
+            selectionError = "no available instances for " + methodKey;
+        }
+        else
+        {
+            // 每个方法独立轮询实例，其余请求复用对应 endpoint 的连接
+            size_t &next = nextEndpoint_[methodKey];
+            selectedEndpoint = endpoints->second[next % endpoints->second.size()];
+            next = (next + 1) % endpoints->second.size();
+
+            auto client = clients_.find(selectedEndpoint);
+            if (client == clients_.end())
+            {
+                InetAddress address;
+                if (!ParseEndpoint(selectedEndpoint, &address))
+                {
+                    selectionError = "invalid discovered endpoint: " + selectedEndpoint;
+                }
+                else
+                {
+                    selectedClient.reset(new MprpcChannel(loop_, address));
+                    std::weak_ptr<MprpcDiscoveryChannel> weakSelf = self;
+                    selectedClient->disconnectedCallback_ =
+                        [weakSelf]()
+                    {
+                        if (std::shared_ptr<MprpcDiscoveryChannel> owner =
+                                weakSelf.lock())
+                        {
+                            owner->SchedulePrune();
+                        }
+                    };
+                    clients_.emplace(selectedEndpoint, selectedClient);
+                }
+            }
+            else
+            {
+                selectedClient = client->second;
+            }
+        }
+    }
+    if (!selectionError.empty())
+    {
+        failCall(selectionError);
+        return;
+    }
+
+    google::protobuf::Closure *completion = new DiscoveryDone(self, done);
+    selectedClient->CallMethod(method, controller, request, response, completion);
+}
+
+void MprpcDiscoveryChannel::SchedulePrune()
+{
+    std::shared_ptr<MprpcDiscoveryChannel> self = shared_from_this();
+    loop_->queueInLoop([self]()
+                       { self->PruneRetiredClients(); });
+}
+
+void MprpcDiscoveryChannel::PruneRetiredClients()
+{
+    std::lock_guard<std::mutex> lock(discoveryMutex_);
+    for (auto client = clients_.begin(); client != clients_.end();)
+    {
+        bool active = false;
+        for (const auto &method : methodEndpoints_)
+        {
+            if (std::find(method.second.begin(), method.second.end(),
+                          client->first) != method.second.end())
+            {
+                active = true;
+                break;
+            }
+        }
+        if (!active && client->second->pendingCallCount() == 0)
+        {
+            // 先停用连接，等断开回调后再销毁 TcpClient，避免晚到回调访问已释放对象
+            if (client->second->client_.connection())
+            {
+                client->second->client_.disconnect();
+                ++client;
+            }
+            else
+            {
+                client = clients_.erase(client);
+            }
+        }
+        else
+        {
+            ++client;
+        }
+    }
+}
+
+void MprpcChannel::sendCancelInLoop(
+    uint64_t req_id, const std::shared_ptr<PendingCall> &call)
+{
+    // 仅已发送的请求需要通知服务端，尚在本地队列中的请求可直接丢弃
+    if (!call->sent)
+    {
+        return;
+    }
+
+    TcpConnectionPtr conn = call->connection.lock();
+    if (!conn || !conn->connected())
+    {
+        return;
+    }
+
+    RpcFrameHeader header;
+    header.set_req_id(req_id);
+    header.set_control(kRpcFrameControlCancel);
+    header.set_args_size(0);
+    header.set_raw_size(0);
+
+    std::string packet;
+    if (BeginEncodeRpcFrame(header, 0, &packet) != kRpcFrameInvalidOffset)
+    {
+        conn->send(packet);
     }
 }

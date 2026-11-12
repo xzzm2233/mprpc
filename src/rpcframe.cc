@@ -16,6 +16,14 @@ static bool IsValidRpcFrameHeader(const RpcFrameHeader &header)
         return false;
     }
 
+    // 控制帧不携带 body，新字段对旧 protobuf peer 仍是可忽略的未知字段
+    if (header.control() != 0)
+    {
+        return header.control() == kRpcFrameControlCancel &&
+               header.flags() == 0 && header.args_size() == 0 &&
+               header.raw_size() == 0 && header.err_code() == 0;
+    }
+
     if ((header.flags() & kRpcFrameFlagCompressed) != 0)
     {
         return header.raw_size() != 0 && header.args_size() != 0;

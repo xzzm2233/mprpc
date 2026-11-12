@@ -15,7 +15,7 @@ class RpcMetrics
 public:
     static RpcMetrics &instance();
 
-    // scope 区分 client/server；method 为服务方法或内部事件名
+    // scope 区分 client/server，method 为服务方法或内部事件名
     void record(const std::string &scope, const std::string &method,
                 int64_t latencyNs, bool ok, bool timeout, bool busy);
 
@@ -51,4 +51,6 @@ private:
 
     std::mutex mu_;
     std::map<std::string, std::unique_ptr<Entry>> entries_;
+    // 方法维度达到上限后汇总到此项，避免指标标签导致内存无限增长
+    std::unique_ptr<Entry> overflowEntry_;
 };

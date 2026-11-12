@@ -24,6 +24,7 @@ public:
     bool submit(std::function<void()> task);
 
     size_t pending() const; // 当前排队任务数
+    // 返回线程池生命周期内因队列已满或线程池停止而拒绝的提交总数
     uint64_t rejected() const { return rejected_.load(std::memory_order_relaxed); }
 
 private:

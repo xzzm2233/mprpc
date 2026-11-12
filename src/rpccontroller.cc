@@ -154,7 +154,7 @@ void MprpcController::SetDeadline(uint32_t deadlineMs)
 
 int64_t MprpcController::RemainingMs() const
 {
-    // 返回剩余预算；负值表示未设置 deadline，零表示已超时
+    // 返回剩余预算，负值表示未设置 deadline，零表示已超时
     const int64_t budget = deadlineMs_.load(std::memory_order_relaxed);
     if (budget == 0)
     {

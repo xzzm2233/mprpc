@@ -22,5 +22,12 @@ target_compile_features(mprpc PUBLIC cxx_std_11)
 # ZooKeeper 多线程客户端要求 THREADED 宏
 target_compile_definitions(mprpc PUBLIC THREADED)
 
-# 运行时依赖：网络循环、线程、服务发现和 Zstandard 压缩
-target_link_libraries(mprpc PUBLIC mymuduo pthread zookeeper_mt zstd)
+# 运行时依赖：网络循环、Protobuf、线程、服务发现和 Zstandard 压缩
+target_link_libraries(mprpc PUBLIC mymuduo protobuf pthread zookeeper_mt zstd)
+
+# BUILD_TESTING 开启时构建帧协议回归测试
+if(BUILD_TESTING)
+    add_executable(mprpc_rpcframe_test tests/rpcframe_test.cc)
+    target_link_libraries(mprpc_rpcframe_test PRIVATE mprpc)
+    add_test(NAME mprpc_rpcframe_test COMMAND mprpc_rpcframe_test)
+endif()

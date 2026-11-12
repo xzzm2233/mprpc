@@ -12,8 +12,8 @@
 static const int kSessionTimeoutMs = 30000;
 static const int kCreateRetries = 3;
 
-// 启动客户端专属后台线程；ZooKeeper 原生 watcher 只负责派发轻量事件，
-// watcher 后续处理、用户回调和会话重建由该线程串行执行。
+// 启动客户端专属后台线程，ZooKeeper 原生 watcher 只负责派发轻量事件，
+// watcher 后续处理、用户回调和会话重建由该线程串行执行
 ZkClient::ZkClient()
     : worker_(&ZkClient::workerLoop, this)
 {
@@ -46,7 +46,7 @@ void ZkClient::sessionWatcher(zhandle_t *, int type, int state, const char *, vo
 
 void ZkClient::childrenWatcher(zhandle_t *, int type, int state, const char *path, void *watcherCtx)
 {
-    // Watch 是一次性的；触发后转发订阅回调，由订阅方重新读取以续订
+    // Watch 是一次性的，触发后转发订阅回调，由订阅方重新读取以续订
     (void)state;
     (void)path;
     if (type == ZOO_SESSION_EVENT)
@@ -61,23 +61,34 @@ void ZkClient::childrenWatcher(zhandle_t *, int type, int state, const char *pat
     }
     ZkClient *client = watchContext->client;
 
+    // 一个路径共用一次性 watch，把事件扇出给订阅者，由各自回调刷新并续订
     // 先复制回调并释放锁，再排队，避免在 ZooKeeper 原生 IO 线程调用同步 API
-    std::function<void()> callback;
+    std::vector<std::function<void()>> callbacks;
     {
         std::lock_guard<std::mutex> lock(client->watchMu_);
         auto watchEntry = client->watches_.find(watchContext->path);
-        if (watchEntry == client->watches_.end() || !watchEntry->second->callback)
+        if (watchEntry == client->watches_.end())
         {
             return;
         }
-        callback = watchEntry->second->callback;
+        watchEntry->second->watchInstalled = false;
+        for (const auto &entry : watchEntry->second->callbacks)
+        {
+            if (entry.second)
+            {
+                callbacks.push_back(entry.second);
+            }
+        }
     }
-    client->queueTask(std::move(callback));
+    for (auto &callback : callbacks)
+    {
+        client->queueTask(std::move(callback));
+    }
 }
 
 void ZkClient::handleSessionEvent(int state)
 {
-    // 连接成功唤醒 Start() 等待者；重连恢复与用户通知在后台线程排队执行
+    // 连接成功唤醒 Start() 等待者，重连恢复与用户通知在后台线程排队执行
     if (state == ZOO_CONNECTED_STATE)
     {
         bool isReconnect = false;
@@ -91,14 +102,21 @@ void ZkClient::handleSessionEvent(int state)
         queueTask([this, isReconnect]()
                   {
                       refreshWatches();
-                      invokeSessionCallbacks(isReconnect);
-                  });
+                      invokeSessionCallbacks(isReconnect); });
         return;
     }
 
     if (state == ZOO_EXPIRED_SESSION_STATE || state == ZOO_AUTH_FAILED_STATE)
     {
         LOG_ERROR("zookeeper session expired/auth failed, will rebuild session");
+        // 旧会话上的 watch 已失效，允许新会话重新安装
+        {
+            std::lock_guard<std::mutex> lock(watchMu_);
+            for (auto &watch : watches_)
+            {
+                watch.second->watchInstalled = false;
+            }
+        }
         {
             std::lock_guard<std::mutex> lock(stateMu_);
             connected_ = false;
@@ -109,6 +127,13 @@ void ZkClient::handleSessionEvent(int state)
     }
 
     // DISCONNECTED / CONNECTING / ASSOCIATING...
+    {
+        std::lock_guard<std::mutex> lock(watchMu_);
+        for (auto &watch : watches_)
+        {
+            watch.second->watchInstalled = false;
+        }
+    }
     std::lock_guard<std::mutex> lock(stateMu_);
     connected_ = false;
     stateCv_.notify_all();
@@ -157,7 +182,21 @@ void ZkClient::removeWatch(const char *path)
         auto watchEntry = watches_.find(path);
         if (watchEntry != watches_.end())
         {
-            watchEntry->second->callback = nullptr;
+            watchEntry->second->callbacks.clear();
+        }
+    }
+}
+
+void ZkClient::removeWatch(const char *path, void *owner)
+{
+    std::lock_guard<std::mutex> lock(watchMu_);
+    if (path)
+    {
+        auto watchEntry = watches_.find(path);
+        if (watchEntry != watches_.end())
+        {
+            // WatchCtx 仍保留到句柄关闭，避免 ZooKeeper 持有的裸指针失效
+            watchEntry->second->callbacks.erase(owner);
         }
     }
 }
@@ -184,7 +223,7 @@ zhandle_t *ZkClient::takeHandle()
 
 bool ZkClient::Start(double timeoutSec)
 {
-    // 句柄创建与连接等待分开；并发 Start 调用可复用同一会话
+    // 句柄创建与连接等待分开，并发 Start 调用可复用同一会话
     if (!hasHandle())
     {
         if (!startInternal(timeoutSec, true))
@@ -202,7 +241,7 @@ bool ZkClient::Start(double timeoutSec)
 
 bool ZkClient::startInternal(double timeoutSec, bool announce)
 {
-    // apiMu_ 保护句柄创建；stateCv_ 等待 sessionWatcher 报告连接或关闭
+    // apiMu_ 保护句柄创建，stateCv_ 等待 sessionWatcher 报告连接或关闭
     std::string host = MprpcApplication::GetInstance().GetConfig().Load("zookeeperip");
     std::string port = MprpcApplication::GetInstance().GetConfig().Load("zookeeperport");
     if (host.empty() || port.empty())
@@ -291,7 +330,7 @@ bool ZkClient::Create(const char *path, const char *data, int datalen, int state
         return false;
     }
 
-    // exists 与 create 在同一把句柄锁下执行；并发创建由 ZNODEEXISTS 视为成功
+    // exists 与 create 在同一把句柄锁下执行，并发创建由 ZNODEEXISTS 视为成功
     for (int attempt = 0; attempt < kCreateRetries; ++attempt)
     {
         int existsResult = ZINVALIDSTATE;
@@ -344,7 +383,7 @@ std::string ZkClient::GetData(const char *path)
     {
         return "";
     }
-    // 数据为 "ip:port"，8KB 足够；按 zoo_get 约定 buffer_len 入参为容量、出参为实际长度
+    // 数据为 "ip:port"，8KB 足够，按 zoo_get 约定 buffer_len 入参为容量、出参为实际长度
     char buffer[8 * 1024] = {0};
     int bufferlen = sizeof(buffer);
     const int resultCode = zoo_get(m_zhandle, path, 0, buffer, &bufferlen, nullptr);
@@ -368,16 +407,25 @@ bool ZkClient::GetChildrenData(const char *path,
                                std::vector<std::string> &children,
                                std::function<void()> onChange)
 {
+    return GetChildrenData(path, children, std::move(onChange), nullptr);
+}
+
+bool ZkClient::GetChildrenData(const char *path,
+                               std::vector<std::string> &children,
+                               std::function<void()> onChange,
+                               void *owner)
+{
     if (!path)
     {
         LOG_ERROR("invalid ZooKeeper children path");
         return false;
     }
 
-    // WatchCtx 地址在句柄关闭前保持稳定；同一路径更新回调但复用上下文
+    // 同路径的 owner 共用 WatchCtx 和底层 watch，只有首个读取负责安装 watch
     children.clear();
 
     std::shared_ptr<WatchCtx> watchContext;
+    bool installWatch = false;
     {
         std::lock_guard<std::mutex> lock(watchMu_);
         auto &watchEntry = watches_[path];
@@ -388,7 +436,13 @@ bool ZkClient::GetChildrenData(const char *path,
             watchEntry->path = path;
         }
         watchContext = watchEntry;
-        watchContext->callback = std::move(onChange);
+        watchContext->callbacks[owner] = std::move(onChange);
+        installWatch = !watchContext->watchInstalled;
+        if (installWatch)
+        {
+            // 先标记再调用 ZooKeeper API，避免并发订阅重复安装同一路径 watch
+            watchContext->watchInstalled = true;
+        }
     }
 
     struct String_vector childrenVector;
@@ -400,9 +454,11 @@ bool ZkClient::GetChildrenData(const char *path,
         std::lock_guard<std::mutex> lock(apiMu_);
         if (m_zhandle)
         {
-            resultCode = zoo_wget_children(m_zhandle, path, childrenWatcher,
-                                           watchContext.get(), &childrenVector);
-            if (resultCode == ZNONODE)
+            resultCode = installWatch
+                             ? zoo_wget_children(m_zhandle, path, childrenWatcher,
+                                                 watchContext.get(), &childrenVector)
+                             : zoo_get_children(m_zhandle, path, 0, &childrenVector);
+            if (installWatch && resultCode == ZNONODE)
             {
                 existsResultCode = zoo_wexists(m_zhandle, path, childrenWatcher,
                                                watchContext.get(), nullptr);
@@ -411,6 +467,11 @@ bool ZkClient::GetChildrenData(const char *path,
     }
     if (resultCode == ZNONODE)
     {
+        if (installWatch && existsResultCode != ZOK)
+        {
+            std::lock_guard<std::mutex> lock(watchMu_);
+            watchContext->watchInstalled = false;
+        }
         // 节点还不存在：挂一个 exists watch，等它出现时回调（回调里会重新拉取）
         LOG_INFO("znode %s not exist yet (exists rc=%d), waiting", path,
                  existsResultCode);
@@ -418,6 +479,11 @@ bool ZkClient::GetChildrenData(const char *path,
     }
     if (resultCode != ZOK)
     {
+        if (installWatch)
+        {
+            std::lock_guard<std::mutex> lock(watchMu_);
+            watchContext->watchInstalled = false;
+        }
         LOG_ERROR("zoo_wget_children(%s) rc=%d", path, resultCode);
         return false;
     }
@@ -433,7 +499,7 @@ bool ZkClient::GetChildrenData(const char *path,
 
 void ZkClient::Close()
 {
-    // 先阻止新任务并 join 工作线程，再关闭句柄；这样在途 watcher 不会访问已释放上下文
+    // 先阻止新任务并 join 工作线程，再关闭句柄，这样在途 watcher 不会访问已释放上下文
     const bool alreadyClosed = closed_.exchange(true, std::memory_order_acq_rel);
     {
         std::lock_guard<std::mutex> lock(stateMu_);
@@ -511,14 +577,24 @@ void ZkClient::workerLoop()
 void ZkClient::refreshWatches()
 {
     // 先快照有效订阅，避免持有 watchMu_ 调用 ZooKeeper API 或用户代码
-    std::vector<std::pair<std::string, std::function<void()>>> watches;
+    struct Subscription
+    {
+        std::string path;
+        void *owner;
+        std::function<void()> callback;
+    };
+    std::vector<Subscription> watches;
     {
         std::lock_guard<std::mutex> lock(watchMu_);
         for (const auto &entry : watches_)
         {
-            if (entry.second->callback)
+            for (const auto &callbackEntry : entry.second->callbacks)
             {
-                watches.emplace_back(entry.first, entry.second->callback);
+                if (callbackEntry.second)
+                {
+                    watches.push_back(
+                        {entry.first, callbackEntry.first, callbackEntry.second});
+                }
             }
         }
     }
@@ -526,7 +602,8 @@ void ZkClient::refreshWatches()
     for (const auto &watchSubscription : watches)
     {
         std::vector<std::string> children;
-        GetChildrenData(watchSubscription.first.c_str(), children,
-                        watchSubscription.second);
+        // 每个 owner 重新读取，共享状态确保同一路径只恢复一个底层 watch
+        GetChildrenData(watchSubscription.path.c_str(), children,
+                        watchSubscription.callback, watchSubscription.owner);
     }
 }

@@ -10,6 +10,7 @@
 const uint32_t kRpcFrameMaxHeaderSize = 1u * 1024 * 1024;
 const uint32_t kRpcFrameMaxBodySize = 64u * 1024 * 1024;
 const uint32_t kRpcFrameFlagCompressed = 0x0001; // body 使用 Zstandard 压缩
+const uint32_t kRpcFrameControlCancel = 1; // control 字段：协作式取消通知
 const size_t kRpcFrameInvalidOffset = static_cast<size_t>(-1);
 
 // 与 RpcHeader.err_code 共用的 RPC 错误码
@@ -65,19 +66,22 @@ struct RpcFrame
     {
         return readableBase + 4 + headerSize;
     }
+    // 返回长度前缀、帧头和 body 的总字节数
     size_t totalSize() const
     {
         return 4u + headerSize + header.args_size();
     }
 };
 
-// 从 readable 字节流中尝试解析一帧；data 必须从当前帧起始位置开始
+// 从 readable 字节流中尝试解析一帧，data 必须从当前帧起始位置开始
 RpcFrameFeedResult FeedRpcFrame(const char *data, size_t readable,
                                 RpcFrame *frame);
 
 // Zstandard body 压缩/解压辅助函数
 size_t RpcFrameCompressBound(size_t srcLen);
+// dstCap 是目标缓冲区容量，成功时通过 outLen 返回实际压缩长度
 bool CompressRpcFrameBody(const void *src, size_t srcLen, void *dst,
                           size_t dstCap, int level, size_t *outLen);
+// dstCap 是目标缓冲区容量，成功时通过 outLen 返回实际解压长度
 bool DecompressRpcFrameBody(const void *src, size_t srcLen, void *dst,
                             size_t dstCap, size_t *outLen);

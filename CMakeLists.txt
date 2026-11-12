@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.10)
 project(mprpc)
 
+# 提供 BUILD_TESTING 开关，供子目录注册并运行 CTest 测试
+include(CTest)
+
 # 默认使用 C++11
 if(NOT DEFINED CMAKE_CXX_STANDARD)
     set(CMAKE_CXX_STANDARD 11 CACHE STRING "C++ standard used to build mprpc")

@@ -44,6 +44,19 @@ RpcMetrics::Entry *RpcMetrics::get(const std::string &scope,
     {
         return metricsEntry->second.get();
     }
+    // 保持方法标签集合有界，无法新增的标签共享 overflow 项
+    if (entries_.size() >= 4096)
+    {
+        if (!overflowEntry_)
+        {
+            overflowEntry_.reset(new Entry());
+            for (auto &bucket : overflowEntry_->buckets)
+            {
+                bucket.store(0, std::memory_order_relaxed);
+            }
+        }
+        return overflowEntry_.get();
+    }
     std::unique_ptr<Entry> newEntry(new Entry());
     for (auto &bucket : newEntry->buckets)
     {
@@ -79,7 +92,7 @@ void RpcMetrics::record(const std::string &scope, const std::string &method,
         uint64_t previousMaximum = metricsEntry->latencyMaxNs.load(std::memory_order_relaxed);
         while (latencyNs > static_cast<int64_t>(previousMaximum) &&
                !metricsEntry->latencyMaxNs.compare_exchange_weak(previousMaximum,
-                                                                  static_cast<uint64_t>(latencyNs)))
+                                                                 static_cast<uint64_t>(latencyNs)))
         {
         }
         metricsEntry->buckets[bucketOf(latencyNs)].fetch_add(1, std::memory_order_relaxed);
@@ -94,7 +107,7 @@ void RpcMetrics::inflightUp(const std::string &scope, const std::string &method)
     uint64_t peak = metricsEntry->inflightPeak.load(std::memory_order_relaxed);
     while (inflightCount > peak &&
            !metricsEntry->inflightPeak.compare_exchange_weak(peak, inflightCount,
-                                                              std::memory_order_relaxed))
+                                                             std::memory_order_relaxed))
     {
     }
 }
@@ -119,6 +132,11 @@ void RpcMetrics::dump()
         for (auto &metricsEntry : entries_)
         {
             snapshot.emplace_back(metricsEntry.first, metricsEntry.second.get());
+        }
+        // overflow 不在标签 map 中，单独加入快照以便仍可观测汇总值
+        if (overflowEntry_)
+        {
+            snapshot.emplace_back("__overflow__", overflowEntry_.get());
         }
     }
     if (snapshot.empty())

@@ -26,7 +26,7 @@ void MprpcConfig::LoadConfigFile(const char *config_file)
         exit(EXIT_FAILURE);
     }
 
-    // 每次加载都以新文件为准；同一文件内重复键由后出现的值覆盖
+    // 每次加载都以新文件为准，同一文件内重复键由后出现的值覆盖
     m_configMap.clear();
 
     std::string configLine;

@@ -17,14 +17,19 @@ public:
 
     // 清空上一次调用的状态，以便安全复用控制器
     void Reset();
+    // 查询当前调用是否失败，并读取或设置对应错误信息
     bool Failed() const;
     std::string ErrorText() const;
     void SetFailed(const std::string &reason);
 
+    // 发起一次协作式取消，已注册回调在调用 StartCancel 的线程执行
     void StartCancel();
+    // 查询当前调用是否已请求取消
     bool IsCanceled() const;
 
-    // 安装由 StartCancel() 触发的通道回调
+    // 客户端取消会通知服务端，服务端 handler 应检查 IsCanceled() 或注册回调，
+    // 取消是协作式的，不会强制终止正在运行的业务线程
+    // 回调在触发取消的线程执行，若注册时已取消则在注册线程立即执行
     void setCancelCallback(std::function<void()> cb);
     void NotifyOnCancel(google::protobuf::Closure *callback) override;
 
@@ -43,6 +48,7 @@ public:
     void setTraceId(uint64_t id) { traceId_.store(id, std::memory_order_relaxed); }
     uint64_t traceId() const { return traceId_.load(std::memory_order_relaxed); }
 
+    // 保存调用幂等标志，该标志不会触发框架自动重试
     void SetIdempotent(bool idempotent)
     {
         idempotent_.store(idempotent, std::memory_order_relaxed);

@@ -20,7 +20,7 @@ void MprpcApplication::Init(int argc, char **argv)
         ShowArgsHelp();
         exit(EXIT_FAILURE);
     }
-    // getopt 解析配置文件参数；应用启动时必须显式指定配置文件
+    // getopt 解析配置文件参数，应用启动时必须显式指定配置文件
     int option = 0;
     std::string config_file;
     while ((option = getopt(argc, argv, "i:")) != -1)
