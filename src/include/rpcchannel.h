@@ -14,6 +14,7 @@
 #include <google/protobuf/message.h>
 
 #include <cstddef>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <string>
@@ -89,6 +90,7 @@ private:
     EventLoop *loop_; // 非拥有指针，生命周期由创建方保证
     TcpClient client_;
     std::shared_ptr<CallbackOwner> callbackOwner_;
+    std::mutex disconnectedCallbackMutex_;
 
     std::atomic<uint64_t> m_reqId{0}; // 当前通道内递增的请求 ID
     mutable std::mutex m_mutex;       // 保护跨线程访问的待完成调用表
@@ -138,9 +140,11 @@ private:
     const std::string serviceName_;
     const double zkConnectTimeoutSec_;
     mutable std::mutex discoveryMutex_;
+    std::condition_variable watchInitCv_;
     std::unordered_map<std::string, std::vector<std::string>> methodEndpoints_;
     std::unordered_map<std::string, size_t> nextEndpoint_;
     std::unordered_map<std::string, std::shared_ptr<MprpcChannel>> clients_;
     std::unordered_set<std::string> watchedPaths_;
+    std::unordered_set<std::string> initializingWatchPaths_;
     bool zkReady_ = false;
 };

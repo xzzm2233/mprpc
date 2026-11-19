@@ -324,9 +324,14 @@ void MprpcChannel::onConnection(const TcpConnectionPtr &conn)
                 call->done->Run();
             }
         }
-        if (disconnectedCallback_)
+        std::function<void()> disconnectedCallback;
         {
-            disconnectedCallback_();
+            std::lock_guard<std::mutex> lock(disconnectedCallbackMutex_);
+            disconnectedCallback = disconnectedCallback_;
+        }
+        if (disconnectedCallback)
+        {
+            disconnectedCallback();
         }
     }
 }
@@ -417,8 +422,7 @@ void MprpcChannel::onResponse(const RpcFrameHeader &header,
     }
 }
 
-std::shared_ptr<MprpcChannel::PendingCall>
-MprpcChannel::takePendingCall(uint64_t req_id)
+std::shared_ptr<MprpcChannel::PendingCall> MprpcChannel::takePendingCall(uint64_t req_id)
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     auto pendingCallEntry = m_pendingCalls.find(req_id);
@@ -727,12 +731,21 @@ void MprpcDiscoveryChannel::CallMethod(
     const std::string methodName = method->name();
     const std::string methodKey = serviceName_ + "." + methodName;
     const std::string path = "/" + serviceName_ + "/" + methodName;
-    bool needWatch = false;
+    bool initializeWatch = false;
     {
-        std::lock_guard<std::mutex> lock(discoveryMutex_);
-        needWatch = watchedPaths_.insert(path).second;
+        std::unique_lock<std::mutex> lock(discoveryMutex_);
+        if (watchedPaths_.insert(path).second)
+        {
+            initializingWatchPaths_.insert(path);
+            initializeWatch = true;
+        }
+        else
+        {
+            watchInitCv_.wait(lock, [this, &path]()
+                              { return initializingWatchPaths_.count(path) == 0; });
+        }
     }
-    if (needWatch)
+    if (initializeWatch)
     {
         // 每个 service/method 首次调用时建立订阅，并立即读取现有实例
         std::vector<std::string> children;
@@ -749,6 +762,11 @@ void MprpcDiscoveryChannel::CallMethod(
             this);
         ApplyEndpointUpdate(methodKey,
                             found ? children : std::vector<std::string>());
+        {
+            std::lock_guard<std::mutex> lock(discoveryMutex_);
+            initializingWatchPaths_.erase(path);
+        }
+        watchInitCv_.notify_all();
     }
 
     PruneRetiredClients();
@@ -781,15 +799,19 @@ void MprpcDiscoveryChannel::CallMethod(
                 {
                     selectedClient.reset(new MprpcChannel(loop_, address));
                     std::weak_ptr<MprpcDiscoveryChannel> weakSelf = self;
-                    selectedClient->disconnectedCallback_ =
-                        [weakSelf]()
                     {
-                        if (std::shared_ptr<MprpcDiscoveryChannel> owner =
-                                weakSelf.lock())
+                        std::lock_guard<std::mutex> callbackLock(
+                            selectedClient->disconnectedCallbackMutex_);
+                        selectedClient->disconnectedCallback_ =
+                            [weakSelf]()
                         {
-                            owner->SchedulePrune();
-                        }
-                    };
+                            if (std::shared_ptr<MprpcDiscoveryChannel> owner =
+                                    weakSelf.lock())
+                            {
+                                owner->SchedulePrune();
+                            }
+                        };
+                    }
                     clients_.emplace(selectedEndpoint, selectedClient);
                 }
             }
